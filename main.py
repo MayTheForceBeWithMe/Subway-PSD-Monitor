@@ -10,13 +10,17 @@ import json
 
 class PSD_Monitoring(object):
     
-    def __init__(self, StationName, StationLine, StationNum):
+    def __init__(self, StationName, StationLine, StationMark):
         self.device_num = []
         self.ModbusClient_ip = []
         self.ModbusClient_port = []
-        self.current_time = datetime.now()  
-        self.station_info = {"name": StationName, "line": StationLine, "num": StationNum}
-        self.collect_err = {"STWJ": None, "KMJ": None, "GMJ": None, "MGJ": None, "QCJ": None, "LZ-LF": None, "KZ-KF": None, "Notes": ''}
+        self.data_sender = [] 
+        self.database_info = {'host': 'localhost', 'port': 8086, 'username': 'WangShiji', 'password': 'cdf5cac0bcaa', 'DBname': StationName}
+        self.station_info = {"name": StationName, "line": StationLine, "mark": StationMark}
+        self.station_client = {}
+        self.server_client = {}
+        self.collect_err = {"STWJ": None, "KMJ": None, "GMJ": None, "MGJ": None, "QCJ": None, "LZ-LF": None, "KZ-KF": None, "Notes": None}
+        
 
     def add_devices(self, NUM, IP, PORT):
         self.device_num.append(NUM)
@@ -24,8 +28,26 @@ class PSD_Monitoring(object):
         self.ModbusClient_port.append(PORT)
         
     def read_config_file(self):
-        pass
-        
+        with open(str('subway/setting.json'), encoding='utf-8') as cfg:
+            dict_cfg = json.load(cfg)
+            # get config
+            self.station_client['host'] = dict_cfg['client']['host']
+            self.station_client['port'] = dict_cfg['client']['port']
+            self.station_info['client'] = self.station_client
+            self.add_devices(0, self.station_client['host'], self.station_client['port'])
+            # server
+            try:
+                server_num = dict_cfg['server']
+                for i in range(server_num):
+                    n = i+1
+                    server = 'server' + str(n)
+                    self.server_client['host'] = dict_cfg[server]['host']
+                    self.server_client['port'] = dict_cfg[server]['port']
+                    self.add_devices(n, self.server_client['host'], self.server_client['port'])
+            except:
+                pass
+           
+  
     def receive_data(self, devices, T):
         print("\n正在连接")
         client = ModbusTcpClient(devices[1],  devices[2])
@@ -38,13 +60,12 @@ class PSD_Monitoring(object):
                 read_result = client.read_holding_registers(0, 10)
                 if not read_result.isError():   
                     read_result = bin(read_result.registers[0])[2:]
-                    notes = self.status_judgment(read_result)
+                    notes = self.alarm_judgment(read_result)
                     collect_set = {"STWJ": read_result[6], "KMJ": read_result[5], "GMJ": read_result[4], "MGJ": read_result[3], "QCJ": read_result[2], "LZ-LF": read_result[1], "KZ-KF": read_result[0], "Notes": notes}
-                    time.sleep(T)
-                    #self.DataBase_send(devices[1], collect_set)
-                    
+                    self.DataBase_send(devices[1], collect_set)
                     #print("设备{}中读取到寄存器的值：{}".format(devices[0], read_result))  
-                    print(collect_set)
+                    time.sleep(T)
+                    #print(collect_set)
                     
                 else:   
                     print("设备{}数据接收错误".format(devices[0]))
@@ -65,23 +86,34 @@ class PSD_Monitoring(object):
 
               
     def run(self):
+        ''' main '''
+        # reading devices config file from Json
+        self.read_config_file()
         # checking devices
         for i in range(len(self.device_num)):
-            print("设备{}\tIP地址：{}\t端口号：{}".format(self.device_num[i], self.ModbusClient_ip[i], self.ModbusClient_port[i]))
-    
-        # TCP connect
+            print("设备{}\tIP地址：{}\t端口号：{}".format(self.device_num[i], self.ModbusClient_ip[i], self.ModbusClient_port[i]))  
+            
+        # Conncting to the Influxdb 
+        
+        self.DataBase_connect(self.database_info['host'], self.database_info['port'], self.database_info['username'], self.database_info['password'], self.database_info['DBname'])
+        
+        # ModbusTCP connecting and create device threads one by one
         for i in range(len(self.device_num)):
             device = [self.device_num[i], self.ModbusClient_ip[i], self.ModbusClient_port[i]]
-            threading.Thread(target=self.receive_data(device, 0.25)).start()
+            # starting thread to collect data
+            threading.Thread(target=self.receive_data, kwargs={'devices': device, 'T': 0.25}).start()
                 
                 
     def DataBase_connect(self, HOST, PORT, USER, PASSWORD, DBNAME):
-        # connect to data base 
+        # connect to data base (this is a test)
         self.DBclient = InfluxDBClient(HOST, PORT, USER, PASSWORD)
-        self.DBclient.switch_database(DBNAME)
+        self.DBclient.drop_database(self.database_info['DBname'])     
+        self.DBclient.create_database(self.database_info['DBname'])   
+        self.DBclient.switch_database(DBNAME)                       
         
     def DataBase_send(self, DeviceIP, DATA):
         # send data to data base
+        current_time = datetime.now()
         monitor_data = \
         [
             {
@@ -91,7 +123,7 @@ class PSD_Monitoring(object):
                     "DeviceIP": DeviceIP,
                     "Line": self.station_info['line'],
                 },
-                "time": self.current_time,
+                "time": current_time,
                 "fields": 
                 {
                     "STWJ": DATA['STWJ'],
@@ -105,15 +137,11 @@ class PSD_Monitoring(object):
                 }
             }
         ]
+        print(monitor_data)
         self.DBclient.write_points(monitor_data)
+        self.DBclient.close()
 
             
 if __name__ == "__main__":
     Station = PSD_Monitoring('马泉营', '上行', 'S4')
-    Station.add_devices(1, '192.168.1.250', 502)
-    Station.add_devices(2, '192.168.1.251', 502)
     Station.run()
-
-        
-        
-        
