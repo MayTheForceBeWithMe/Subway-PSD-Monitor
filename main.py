@@ -94,8 +94,7 @@ class PSD_Monitoring(object):
             print("设备{}\tIP地址：{}\t端口号：{}".format(self.device_num[i], self.ModbusClient_ip[i], self.ModbusClient_port[i]))  
             
         # Conncting to the Influxdb 
-        
-        self.DataBase_connect(self.database_info['host'], self.database_info['port'], self.database_info['username'], self.database_info['password'], self.database_info['DBname'])
+        self.DataBase_connect(self.database_info['host'], self.database_info['port'], self.database_info['username'], self.database_info['password'])
         
         # ModbusTCP connecting and create device threads one by one
         for i in range(len(self.device_num)):
@@ -104,12 +103,14 @@ class PSD_Monitoring(object):
             threading.Thread(target=self.receive_data, kwargs={'devices': device, 'T': 0.25}).start()
                 
                 
-    def DataBase_connect(self, HOST, PORT, USER, PASSWORD, DBNAME):
+    def DataBase_connect(self, HOST, PORT, USER, PASSWORD):
         # connect to data base (this is a test)
         self.DBclient = InfluxDBClient(HOST, PORT, USER, PASSWORD)
-        self.DBclient.drop_database(self.database_info['DBname'])     
+        # clearing data base
+        self.DBclient.drop_database(self.database_info['DBname'])  
+        # and then creating   
         self.DBclient.create_database(self.database_info['DBname'])   
-        self.DBclient.switch_database(DBNAME)                       
+        self.DBclient.switch_database(self.database_info['DBname'])                       
         
     def DataBase_send(self, DeviceIP, DATA):
         # send data to data base
