@@ -22,9 +22,8 @@ class PSD_Monitoring(object):
         self.server_client = {}
         self.collect_err = {"STWJ": None, "KMJ": None, "GMJ": None, "MGJ": None, "QCJ": None, "LZ-LF": None, "KZ-KF": None, "Notes": None}
         self.collect_nop = []
-        self.collect_nop0 = []
-        self.collect_nop_front = []
-        self.collect_nop_now = []
+        self.previous_data = []
+        self.current_data = []
         
 
     def add_devices(self, NUM, IP, PORT):
@@ -63,6 +62,7 @@ class PSD_Monitoring(object):
                     break
                 
                 read_result = client.read_holding_registers(0, 10)
+                # every data and data notes is not erro or void, then display
                 if not read_result.isError():   
                     read_result = bin(read_result.registers[0])[2:]
                     notes = self.alarm_judgment(read_result)
@@ -78,7 +78,7 @@ class PSD_Monitoring(object):
                 else:   
                     print("设备{}数据接收错误".format(devices[0]))
                     break
-                        
+                   
             except:
                 notes = "设备{}连接异常".format(devices[0])
                 self.collect_err['Notes'] = notes
@@ -88,21 +88,44 @@ class PSD_Monitoring(object):
         print("连接已中断")
         
         
-    def alarm_judgment(self, signal):
+    def alarm_judgment(self, collect):
         # data alarm processing
-        self.collect_nop = [signal[6], signal[5], signal[4], signal[3], signal[2], signal[1], signal[0]]
-        self.collect_nop0.append(self.collect_nop)
-        if len(self.collect_nop0) == 2:
-            same = all(a == b for a, b in zip(self.collect_nop0[0], self.collect_nop0[1]))
-            for a, b in zip(self.collect_nop0[0], self.collect_nop0[1]):
-                self.collect_nop_front.append(a)
-                self.collect_nop_now.append(b)
-             # train arriving
-
-            # alarm
-        if same == True:
-            return '无列车停靠'
-               
+        self.collect_nop.append([collect[6], collect[5], collect[4], collect[3], collect[2], collect[1], collect[0]])
+        if len(self.collect_nop) == 2:
+            # getting data from previous status and current status
+            self.previous_data =  list(map(int, self.collect_nop[0]))
+            self.current_data = list(map(int, self.collect_nop[1]))
+            self.collect_nop.clear()
+            # train arriving 
+            if self.previous_data ==  [0, 0, 1, 1, 0, 1, 1] and self.current_data == [0, 0, 1, 1, 0, 1, 1]:
+                return '无列车停靠'
+            if (self.previous_data == [0, 0, 1, 1, 0, 1, 1] and self.current_data == [1, 0, 1, 0, 0, 1, 1]) or \
+               (self.previous_data == [1, 0, 1, 0, 0, 1, 1] and self.current_data == [1, 0, 1, 0, 0, 1, 1]):
+                return '列车停稳'
+            if (self.previous_data == [1, 0, 1, 0, 0, 1, 1] and self.current_data == [1, 1, 0, 0, 0, 1, 1]) or \
+               (self.previous_data == [1, 1, 0, 0, 0, 1, 1] and self.current_data == [1, 1, 0, 0, 0, 1, 1]):
+                return '开门'
+            if (self.previous_data == [1, 0, 1, 0, 0, 1, 1] and self.current_data == [1, 0, 1, 0, 0, 1, 1]) or \
+               (self.previous_data == [1, 0, 1, 0, 0, 1, 1] and self.current_data == [1, 0, 1, 0, 0, 1, 1]):
+                return '关门'
+            if (self.previous_data == [1, 0, 1, 0, 0, 1, 1] and self.current_data == [1, 0, 1, 1, 0, 1, 1]) or \
+               (self.previous_data == [1, 0, 1, 1, 0, 1, 1] and self.current_data == [1, 0, 1, 1, 0, 1, 1]):
+                return '门关好'
+            if (self.previous_data == [1, 0, 1, 1, 0, 1, 1] and self.current_data == [0, 0, 1, 1, 0, 1, 1]):
+                return '列车发车'
+            # abnormal alarm
+            if (self.previous_data == [0, 0, 0, 0, 0, 0, 0] and self.current_data == [0, 0, 0, 0, 0, 0, 0]) or \
+               (self.previous_data == [1, 1, 1, 1, 1, 1, 1] and self.current_data == [1, 1, 1, 1, 1, 1, 1]):
+                return '输入异常'
+            if (self.previous_data == [0, 0, 1, 1, 0, 1, 1] and self.current_data == [1, 1, 0, 1, 0, 1, 1]) or \
+               (self.previous_data == [1, 1, 0, 1, 0, 1, 1] and self.current_data == [1, 1, 0, 1, 0, 1, 1]):
+                return '门关好异常落下'
+            if (self.previous_data[5] == 1 and self.current_data[5] == 0) or \
+               (self.previous_data[5] == 0 and self.current_data[5] == 0):
+                return '机电电源异常'
+            if (self.previous_data[6] == 1 and self.current_data[6] == 0) or \
+               (self.previous_data[6] == 0 and self.current_data[6] == 0):
+                return '信号电源异常'
         else:
             return None
 
@@ -144,9 +167,8 @@ class PSD_Monitoring(object):
         ]
         #print(monitor_data)
         self.DBclient.write_points(monitor_data)
-        self.DBclient.close()
-        
-        
+
+ 
     def run(self):
         ''' main '''
         # reading devices config from Json
