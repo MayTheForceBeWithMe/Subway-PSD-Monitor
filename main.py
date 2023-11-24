@@ -15,21 +15,28 @@ class PSD_Monitoring(object):
         self.ModbusClient_ip = []
         self.ModbusClient_port = []
         self.data_sender = [] 
-        self.nop_time = datetime.now()
         self.database_info = {'host': 'localhost', 'port': 8086, 'username': 'WangShiji', 'password': 'cdf5cac0bcaa', 'DBname': StationName}
         self.station_info = {"name": StationName, "line": StationLine, "mark": StationMark}
         self.station_client = {}
         self.server_client = {}
-        self.collect_err = {"STWJ": None, "KMJ": None, "GMJ": None, "MGJ": None, "QCJ": None, "LZ-LF": None, "KZ-KF": None, "Notes": None}
+        self.collect_err = {"STWJ": None, "KMJ": None, "GMJ": None, "MGJ": None, "QCJ": None, "LZ-LF": None, "KZ-KF": None, "Note": None}
         self.collect_nop = []
         self.previous_data = []
         self.current_data = []
+        self.collect_notes = None
+        self.current_note = None
         
 
     def add_devices(self, NUM, IP, PORT):
         self.device_num.append(NUM)
         self.ModbusClient_ip.append(IP)
         self.ModbusClient_port.append(PORT)
+        
+        
+    def display_devices(self):
+        for i in range(len(self.device_num)):
+            print("设备{}\tIP地址：{}\t端口号：{}".format(self.device_num[i], self.ModbusClient_ip[i], self.ModbusClient_port[i])) 
+        
         
     def read_config_file(self):
         with open(str('subway/setting.json'), encoding='utf-8') as cfg:
@@ -54,23 +61,25 @@ class PSD_Monitoring(object):
   
     def receive_data(self, devices, T):
         print("\n正在连接")
-        client = ModbusTcpClient(devices[1],  devices[2])
+        TCPclient = ModbusTcpClient(devices[1],  devices[2])
         while True:
             try:     
-                if not client.connect():   
+                if not TCPclient.connect():   
                     print("设备{}无法连接".format(devices[0]))   
                     break
                 
-                read_result = client.read_holding_registers(0, 10)
+                read_result = TCPclient.read_holding_registers(0, 10)
                 # every data and data notes is not erro or void, then display
                 if not read_result.isError():   
                     read_result = bin(read_result.registers[0])[2:]
-                    notes = self.alarm_judgment(read_result)
-                    if notes is not None:
-                        collect_set = {"STWJ": read_result[6], "KMJ": read_result[5], "GMJ": read_result[4], "MGJ": read_result[3], "QCJ": read_result[2], "LZ-LF": read_result[1], "KZ-KF": read_result[0], "Notes": notes}
+                    note = self.alarm_judgment(read_result)
+                    if note is not None:
+                        collect_set = {"STWJ": read_result[6], "KMJ": read_result[5], "GMJ": read_result[4], "MGJ": read_result[3], "QCJ": read_result[2], "LZ-LF": read_result[1], "KZ-KF": read_result[0], "Note": note}
                         # Writing to data base
-                        #self.DataBase_send(devices[1],self.nop_time, collect_set)
-                        #print("设备{}中读取到寄存器的值：{}".format(devices[0], read_result))  
+                        if self.alarm_change(collect_set['Note']) == True:
+                            alarm_time = datetime.now()
+                            print(alarm_time)
+                            #self.DataBase_send(devices[1], alarm_time, collect_set) 
                         print(collect_set)
                     else:
                         pass
@@ -80,11 +89,11 @@ class PSD_Monitoring(object):
                     break
                    
             except:
-                notes = "设备{}连接异常".format(devices[0])
-                self.collect_err['Notes'] = notes
+                note = "设备{}连接异常".format(devices[0])
+                self.collect_err['Note'] = note
                 print(self.collect_err)
-                client.close() 
-        client.close()        
+                TCPclient.close() 
+        TCPclient.close()        
         print("连接已中断")
         
         
@@ -128,14 +137,16 @@ class PSD_Monitoring(object):
                 return '信号电源异常'
         else:
             return None
-
-                     
+        
+    def alarm_change(self, notes):
+        pass
+                    
     def DataBase_connect(self, HOST, PORT, USER, PASSWORD):
-        # connect to data base (this is a test)
+        # connect to database (this is a test)
         self.DBclient = InfluxDBClient(HOST, PORT, USER, PASSWORD)
-        # clearing data base
+        # clearing database
         self.DBclient.drop_database(self.database_info['DBname'])  
-        # and then creating   
+        # and then creating a new database again   
         self.DBclient.create_database(self.database_info['DBname'])   
         self.DBclient.switch_database(self.database_info['DBname'])     
                           
@@ -174,12 +185,9 @@ class PSD_Monitoring(object):
         # reading devices config from Json
         self.read_config_file()
         # checking devices
-        for i in range(len(self.device_num)):
-            print("设备{}\tIP地址：{}\t端口号：{}".format(self.device_num[i], self.ModbusClient_ip[i], self.ModbusClient_port[i]))  
-            
+        self.display_devices()
         # Conncting to the Influxdb 
         #self.DataBase_connect(self.database_info['host'], self.database_info['port'], self.database_info['username'], self.database_info['password'])
-        
         # ModbusTCP connecting and create device threads one by one
         for i in range(len(self.device_num)):
             device = [self.device_num[i], self.ModbusClient_ip[i], self.ModbusClient_port[i]]
