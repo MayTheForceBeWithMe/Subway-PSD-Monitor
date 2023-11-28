@@ -19,14 +19,15 @@ class PSD_Monitoring(object):
         self.station_info = {"name": StationName, "line": StationLine, "mark": StationMark}
         self.station_client = {}
         self.server_client = {}
-        self.collect_err = {"STWJ": None, "KMJ": None, "GMJ": None, "MGJ": None, "QCJ": None, "LZ-LF": None, "KZ-KF": None, "Note": None}
+        self.collect_err = {"STWJ": None, "KMJ": None, "GMJ": None, "MGJ": None, "QCJ": None, "LZLF": None, "KZKF": None, "Note": None}
         self.collect_nop = []
         self.previous_data = []
         self.current_data = []
+        self.notes_nop = []
         self.collect_notes = None
         self.current_note = None
-        
 
+    
     def add_devices(self, NUM, IP, PORT):
         self.device_num.append(NUM)
         self.ModbusClient_ip.append(IP)
@@ -62,6 +63,7 @@ class PSD_Monitoring(object):
     def receive_data(self, devices, T):
         print("\n正在连接")
         TCPclient = ModbusTcpClient(devices[1],  devices[2])
+        change_flag = False
         while True:
             try:     
                 if not TCPclient.connect():   
@@ -73,14 +75,23 @@ class PSD_Monitoring(object):
                 if not read_result.isError():   
                     read_result = bin(read_result.registers[0])[2:]
                     note = self.alarm_judgment(read_result)
-                    if note is not None:
-                        collect_set = {"STWJ": read_result[6], "KMJ": read_result[5], "GMJ": read_result[4], "MGJ": read_result[3], "QCJ": read_result[2], "LZ-LF": read_result[1], "KZ-KF": read_result[0], "Note": note}
-                        # Writing to data base
-                        if self.alarm_change(collect_set['Note']) == True:
-                            alarm_time = datetime.now()
-                            print(alarm_time)
-                            #self.DataBase_send(devices[1], alarm_time, collect_set) 
+                    collect_set = {"STWJ": read_result[6], "KMJ": read_result[5], "GMJ": read_result[4], "MGJ": read_result[3], "QCJ": read_result[2], "LZLF": read_result[1], "KZKF": read_result[0], "Note": note}
+                    # grtting effective data
+                    if note is not None:    
                         print(collect_set)
+                        try:
+                            device_IP = devices[1]
+                            alarm_time = datetime.now()
+                            # alarm only for data changes and then writing to database
+                            if(change_flag):
+                                if self.alarm_change(collect_set['Note'], threshold=3):
+                                    self.DataBase_send(device_IP, alarm_time, collect_set)      
+                            else:
+                                # getting first data for the first time
+                                self.DataBase_send(device_IP, alarm_time, collect_set)
+                                change_flag = True
+                        except:
+                            pass
                     else:
                         pass
                     time.sleep(T)
@@ -97,6 +108,17 @@ class PSD_Monitoring(object):
         print("连接已中断")
         
         
+    def alarm_change(self, change, threshold):
+        self.notes_nop.append(change)
+        notes_list = self.notes_nop
+        if len(notes_list) == threshold:
+            notes_list.pop(0)
+            if all(x == notes_list[0] for x in notes_list):
+                return False
+            else:  
+                return True 
+            
+                
     def alarm_judgment(self, collect):
         # data alarm processing
         self.collect_nop.append([collect[6], collect[5], collect[4], collect[3], collect[2], collect[1], collect[0]])
@@ -138,8 +160,6 @@ class PSD_Monitoring(object):
         else:
             return None
         
-    def alarm_change(self, notes):
-        pass
                     
     def DataBase_connect(self, HOST, PORT, USER, PASSWORD):
         # connect to database (this is a test)
@@ -151,7 +171,7 @@ class PSD_Monitoring(object):
         self.DBclient.switch_database(self.database_info['DBname'])     
                           
         
-    def DataBase_send(self, DeviceIP, current_time, DATA):
+    def DataBase_send(self, DeviceIP, current_time, fields):
         # send data to data base
         monitor_data = \
         [
@@ -165,14 +185,14 @@ class PSD_Monitoring(object):
                 "time": current_time,
                 "fields": 
                 {
-                    "STWJ": DATA['STWJ'],
-                    "KMJ": DATA['KMJ'],
-                    "GMJ": DATA['GMJ'],
-                    "MGJ": DATA['MGJ'],
-                    "QCJ": DATA['QCJ'],
-                    "LZ-LF": DATA['LZ-LF'],
-                    "KZ-KF": DATA['KZ-KF'],
-                    "Notes": DATA['Notes'],
+                    "STWJ": fields['STWJ'],
+                    "KMJ": fields['KMJ'],
+                    "GMJ": fields['GMJ'],
+                    "MGJ": fields['MGJ'],
+                    "QCJ": fields['QCJ'],
+                    "LZLF": fields['LZLF'],
+                    "KZKF": fields['KZKF'],
+                    "Notes": fields['Note'],
                 }
             }
         ]
@@ -187,12 +207,15 @@ class PSD_Monitoring(object):
         # checking devices
         self.display_devices()
         # Conncting to the Influxdb 
-        #self.DataBase_connect(self.database_info['host'], self.database_info['port'], self.database_info['username'], self.database_info['password'])
+        try:
+            self.DataBase_connect(self.database_info['host'], self.database_info['port'], self.database_info['username'], self.database_info['password'])
+        except:
+            print('\ninfluxdb未连接')
         # ModbusTCP connecting and create device threads one by one
         for i in range(len(self.device_num)):
             device = [self.device_num[i], self.ModbusClient_ip[i], self.ModbusClient_port[i]]
             # starting thread to collect data
-            threading.Thread(target=self.receive_data, kwargs={'devices': device, 'T': 0.25}).start()
+            threading.Thread(target=self.receive_data, kwargs={'devices': device, 'T': 0.2}).start()
 
             
 if __name__ == "__main__":
