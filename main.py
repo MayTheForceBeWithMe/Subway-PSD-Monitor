@@ -5,6 +5,7 @@ from influxdb import InfluxDBClient
 from datetime import datetime  
 import threading
 import time
+import timeit
 import json
 
 
@@ -24,6 +25,7 @@ class PSD_Monitoring(object):
         self.previous_data = []
         self.current_data = []
         self.notes_nop = []
+        self.door_nop = []
         self.collect_notes = None
         self.current_note = None
 
@@ -59,58 +61,7 @@ class PSD_Monitoring(object):
             except:
                 pass
            
-  
-    def receive_data(self, devices, cycle, real_time):
-        print("\n正在连接")
-        TCPclient = ModbusTcpClient(devices[1],  devices[2])
-        change_flag = False
-        while True:
-            try:     
-                if not TCPclient.connect():   
-                    print("设备{}无法连接".format(devices[0]))   
-                    break
-                
-                read_result = TCPclient.read_holding_registers(0, 10)
-                # every data are not erro or void, then display
-                if not read_result.isError():   
-                    # geting data that starts with modbus bit 1 from the registers
-                    read_result = bin(read_result.registers[0])[2:]
-                    # gertting notes and adding it to data set
-                    note = self.alarm_notes(read_result)
-                    data_set = {"STWJ": read_result[6], "KMJ": read_result[5], "GMJ": read_result[4], "MGJ": read_result[3], "QCJ": read_result[2], "LZLF": read_result[1], "KZKF": read_result[0], "Notes": note}
-                    # getting effective data
-                    if note is not None:    
-                        try:
-                            device_IP = devices[1]
-                            alarm_time = datetime.now()
-                            alarm_time_UTC = datetime.utcnow()
-                            # alarm working only for data changes and then writing to database
-                            if change_flag:
-                                if self.upload(data_set['Notes'], real_time):
-                                    self.DataBase_send(device_IP, alarm_time_UTC, data_set) 
-                                    print("\n站名：{} - {}\t编号：{}\t报警时间：{}\t设备IP：{}\t上报数据：{}".format(self.station_info['name'], self.station_info['line'], self.station_info['mark'], alarm_time, device_IP, data_set))
-                            else:
-                                # getting first data for the first time
-                                self.DataBase_send(device_IP, alarm_time_UTC, data_set)
-                                change_flag = True
-                        except:
-                            pass
-                    else:
-                        pass
-                    time.sleep(cycle/1000)
-                else:   
-                    print("设备{}数据接收错误".format(devices[0]))
-                    break
-                   
-            except:
-                note = "设备{}连接异常".format(devices[0])
-                self.collect_err['Notes'] = note
-                print(self.collect_err)
-                TCPclient.close() 
-        TCPclient.close()        
-        print("连接已中断")
-        
-        
+           
     def upload(self, change, real_time):
         if real_time == False:
             self.notes_nop.append(change)
@@ -128,28 +79,30 @@ class PSD_Monitoring(object):
     def alarm_notes(self, collect):
         # data alarm processing
         self.collect_nop.append([collect[6], collect[5], collect[4], collect[3], collect[2], collect[1], collect[0]])
-        if len(self.collect_nop) == 2:
+        collect_list = self.collect_nop
+        if len(collect_list) == 3:
             # getting data from previous status and current status
             self.previous_data =  list(map(int, self.collect_nop[0]))
             self.current_data = list(map(int, self.collect_nop[1]))
-            self.collect_nop.clear()
+            collect_list.pop(0)
             # the train has not arrived
             if self.previous_data ==  [0, 0, 1, 1, 0, 1, 1] and self.current_data == [0, 0, 1, 1, 0, 1, 1]:
                 return '无列车停靠'
             # response signal from the action of the PSD when the train arriving 
             if (self.previous_data == [0, 0, 1, 1, 0, 1, 1] and self.current_data == [1, 0, 1, 0, 0, 1, 1]) or \
-               (self.previous_data == [1, 0, 1, 0, 0, 1, 1] and self.current_data == [1, 0, 1, 0, 0, 1, 1]):
+               (self.previous_data == [1, 0, 1, 1, 0, 1, 1] and self.current_data == [1, 0, 1, 1, 0, 1, 1]):
                 return '列车停稳'
             if (self.previous_data == [1, 0, 1, 0, 0, 1, 1] and self.current_data == [1, 1, 0, 0, 0, 1, 1]) or \
                (self.previous_data == [1, 1, 0, 0, 0, 1, 1] and self.current_data == [1, 1, 0, 0, 0, 1, 1]):
                 return '开门'
-            if (self.previous_data == [1, 0, 1, 0, 0, 1, 1] and self.current_data == [1, 0, 1, 0, 0, 1, 1]) or \
+            if (self.previous_data == [1, 1, 0, 0, 0, 1, 1] and self.current_data == [1, 0, 1, 0, 0, 1, 1]) or \
                (self.previous_data == [1, 0, 1, 0, 0, 1, 1] and self.current_data == [1, 0, 1, 0, 0, 1, 1]):
                 return '关门'
             if (self.previous_data == [1, 0, 1, 0, 0, 1, 1] and self.current_data == [1, 0, 1, 1, 0, 1, 1]) or \
                (self.previous_data == [1, 0, 1, 1, 0, 1, 1] and self.current_data == [1, 0, 1, 1, 0, 1, 1]):
                 return '门关好'
-            if (self.previous_data == [1, 0, 1, 1, 0, 1, 1] and self.current_data == [0, 0, 1, 1, 0, 1, 1]):
+            if (self.previous_data == [1, 0, 1, 1, 0, 1, 1] and self.current_data == [0, 0, 1, 1, 0, 1, 1]) or \
+               (self.previous_data == [0, 0, 1, 1, 0, 1, 1] and self.current_data == [0, 0, 1, 1, 0, 1, 1]):
                 return '列车发车'
             #  response signal about abnormal alarm
             if (self.previous_data == [0, 0, 0, 0, 0, 0, 0] and self.current_data == [0, 0, 0, 0, 0, 0, 0]) or \
@@ -206,8 +159,72 @@ class PSD_Monitoring(object):
             }
         ]
         self.DBclient.write_points(monitor_data)
+    
+    
+    def main(self, devices, cycle, real_time):
+        print("\n正在连接")
+        TCPclient = ModbusTcpClient(devices[1],  devices[2])
+        change_flag = False
+        train_num = 0
+        while True:
+            try:     
+                if not TCPclient.connect():   
+                    print("设备{}无法连接".format(devices[0]))   
+                           
+                read_result = TCPclient.read_holding_registers(0, 10)
+                # every data are not erro or void, then display
+                if not read_result.isError():   
+                    # geting data that starts with modbus bit 1 from the registers
+                    read_result = bin(read_result.registers[0])[2:]
+                    # gertting notes and adding it to data set
+                    note = self.alarm_notes(read_result)
+                    data_set = {"STWJ": read_result[6], "KMJ": read_result[5], "GMJ": read_result[4], "MGJ": read_result[3], "QCJ": read_result[2], "LZLF": read_result[1], "KZKF": read_result[0], "Notes": note}
+                    # getting effective data
+                    if note is not None:    
+                        try:
+                            device_IP = devices[1]
+                            alarm_time = datetime.now()
+                            alarm_time_UTC = datetime.utcnow()
+                            # alarm working only for data changes and then writing to database
+                            if change_flag:
+                                if self.upload(data_set['Notes'], real_time):
+                                    print("\n站名：{} - {}\t编号：{}\t报警时间：{}\t设备IP：{}\t上报数据：{}".format(self.station_info['name'], self.station_info['line'], self.station_info['mark'], alarm_time, device_IP, data_set))
+                                    self.DataBase_send(device_IP, alarm_time_UTC, data_set)
+                                    self.door_nop.append(data_set['Notes'])
+                                    door_list = self.door_nop
+                                    if len(door_list) == 3:
+                                        door_list.pop(0)
+                                    if door_list[0] == '无列车停靠' and door_list[1] == '列车停稳':
+                                        train_arriving_time = timeit.default_timer()   
+                                    if door_list[0] == '列车停稳' and door_list[1] == '开门':
+                                        train_num += 1
+                                        train_departing_time = timeit.default_timer()
+                                        dwell_time = train_departing_time - train_arriving_time
+                                        print("\n-------------------------------第{}辆列车停站时间：{}秒----------------------------".format(train_num, dwell_time))                        
+                                    if door_list[0] == '门关好' and door_list[1] == '列车发车':
+                                        print("\n----------------------------------------下一辆列车-----------------------------------------------")
+                                        print("\n---------------------------------------屏蔽门正常动作--------------------------------------------")
+                            else:
+                                # getting first data for the first time
+                                self.DataBase_send(device_IP, alarm_time_UTC, data_set)
+                                change_flag = True
+                        except:
+                            pass
+                    else:
+                        pass
+                    time.sleep(cycle/1000)
+                else:   
+                    print("设备{}数据接收错误".format(devices[0]))
+                   
+            except:
+                note = "设备{}连接异常".format(devices[0])
+                self.collect_err['Notes'] = note
+                print(self.collect_err)
+                TCPclient.close() 
+        TCPclient.close()        
+        print("连接已中断")
+        
 
- 
     def run(self, cycle, real_time):
         # conncting to the Influxdb 
         self.DataBase_connect(self.database_info['host'], self.database_info['port'], self.database_info['username'], self.database_info['password'])
@@ -215,11 +232,11 @@ class PSD_Monitoring(object):
         for i in range(len(self.device_num)):
             device = [self.device_num[i], self.ModbusClient_ip[i], self.ModbusClient_port[i]]
             # starting thread to collect data
-            threading.Thread(target=self.receive_data, kwargs={'devices': device, 'cycle': cycle, 'real_time': real_time}).start()
+            threading.Thread(target=self.main, kwargs={'devices': device, 'cycle': cycle, 'real_time': real_time}).start()
 
             
 if __name__ == "__main__":
-    Station = PSD_Monitoring('马泉营', '上行', 'S4')
-    Station.read_config_file('subway/setting.json')
-    Station.display_devices()
-    Station.run(cycle=200, real_time=True)
+    station = PSD_Monitoring('马泉营', '上行', 'S4')
+    station.read_config_file('subway/setting.json')
+    station.display_devices()
+    station.run(cycle=200, real_time=True)
