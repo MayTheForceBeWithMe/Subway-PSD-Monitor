@@ -1,47 +1,52 @@
 {
-   "client": {
-      "host": "192.168.1.250",
-      "port": 502
-   },
-   "server": 5,
-   "server1": {
-      "host": "192.168.172.130",
-      "port": 502,
-      "deviceid": 1,
-      "cycle": 300,
-      "di": 0, 
-      "di_len": 10
-   },
-   "server2": {
-      "host": "localhost",
-      "port": 502,
-      "deviceid": 1,
-      "cycle": 300, 
-      "di": 0, 
-      "di_len": 10
-   },
-   "server3": {
-      "host": "localhost",
-      "port": 502,
-      "deviceid": 1,
-      "cycle": 300, 
-      "di": 0, 
-      "di_len": 10
-   },
-   "server4": {
-      "host": "localhost",
-      "port": 502,
-      "deviceid": 1,
-      "cycle": 300, 
-      "di": 0, 
-      "di_len": 10
-   },
-   "server5": {
-      "host": "localhost",
-      "port": 502,
-      "deviceid": 1,
-      "cycle": 300, 
-      "di": 0, 
-      "di_len": 10
+   "TerminalNum": 1,
+   "TerminalClient": 
+   {
+      "T1":
+      {
+         "host": "192.168.1.250",
+         "port": 502,
+         "channels": 
+         {
+            "CH1": 
+            {  
+               "00":   ["上行", [1, "马泉营", "TWJ"]],
+               "01":   ["上行", [1, "马泉营", "KMJ"]],  
+               "02":   ["上行", [1, "马泉营", "GMJ"]],
+               "03":   ["上行", [1, "马泉营", "MGJ"]],
+               "04":   ["上行", [1, "马泉营", "QCJ"]],
+               "05":   ["上行", [1, "马泉营", "LZLF"]],
+               "06":   ["上行", [1, "马泉营", "KZKF"]]
+ 
+            },
+            "CH2": 
+            {
+   
+            },
+            "CH3": 
+            {
+      
+            },
+            "CH4": 
+            {
+
+            }
+         }
+      }
    }
+
+   "DatabaseClient": 
+   {
+      "host": "localhost",
+      "port": 8086,
+      "username": "WangShiji",
+      "password": "cdf5cac0bcaa",
+      "DBname": 
+      [
+         "station",
+         "train"
+      ]
+   },
+
+   "AudioFile": "E:/involuser/屏蔽门上位机/HMI_demo/2023project/subway/Warning.mp3"
 }
