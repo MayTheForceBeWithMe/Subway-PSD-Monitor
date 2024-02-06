@@ -41,6 +41,7 @@ class PSD_Monitoring(object):
         self.q = queue.Queue() 
     
     
+    
     def ff(self, result, time):
         result = hex(result)[2:]
         l = len(result)
@@ -59,6 +60,7 @@ class PSD_Monitoring(object):
                 return int(str(result), base=16)
             
     
+    
     def data_connect(self, group, data):
         # 输入端序号和序列位一一对应
         group_key = group['继电器序列'].keys()
@@ -69,6 +71,7 @@ class PSD_Monitoring(object):
             except:
                 continue
         return group
+    
     
     
     def display_clients(self):
@@ -178,7 +181,7 @@ class PSD_Monitoring(object):
             StationName = CH_ls[0][0]
             LineDirection = CH_ls[0][1]
             ###### RelayGroup and Node ######
-            RelayGroup  = {k[2] : k[3] for k in CH_ls}  
+            RelayGroup = {k[2] : k[3] for k in CH_ls}  
             R = RelayGroup.keys()
             sorted_R = sorted(R, key=lambda x: ['TWJ', 'KMJ', 'GMJ', 'MGJ', 'QCJ', 'LZLF', 'KZKF'].index(x)) 
             RelayGroup = {k: RelayGroup[k] for k in sorted_R}
@@ -220,7 +223,7 @@ class PSD_Monitoring(object):
             return True
             
                 
-    def alarm_notes(self, collect):
+    def alarm_notes(self, collect, num):
         # data alarm processing
         self.collect_nop.append([collect[0], collect[1], collect[2], collect[3], collect[4], collect[5], collect[6]])
         collect_list = self.collect_nop
@@ -230,9 +233,10 @@ class PSD_Monitoring(object):
             self.current_data = self.collect_nop[1]
             # self.previous_data = [int(data) for data in self.previous_data] 
             # self.current_data = [int(data) for data in self.current_data] 
+            #print(self.previous_data, self.current_data)
             collect_list.pop(0)
             # the train has not arrived
-            if self.previous_data ==  [0, 0, 1, 1, 0, 1, 1] and self.current_data == [0, 0, 1, 1, 0, 1, 1]:
+            if self.previous_data == [0, 0, 1, 1, 0, 1, 1] and self.current_data == [0, 0, 1, 1, 0, 1, 1]:
                 return '无列车停靠'
             # response signal from the action of the PSD when the train arriving 
             elif (self.previous_data == [0, 0, 1, 1, 0, 1, 1] and self.current_data == [1, 0, 1, 0, 0, 1, 1]) or \
@@ -346,19 +350,7 @@ class PSD_Monitoring(object):
         
     
      
-    def listen_network(self, host, port, T):  
-        try:  
-            time.sleep(T)
-            # created socket object 
-            sk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  
-            sk.connect((host, port))  
-            print('网络连接成功')  
-            sk.close()  
-        except:  
-            print('网络连接异常') 
     
-
-
     def main(self, clients, cycle, continous):
         TCPclient = ModbusTcpClient(clients[1], clients[2])
         change_flag = False
@@ -371,6 +363,9 @@ class PSD_Monitoring(object):
                 if not TCPclient.connect():   
                     print("设备：{} 无法连接".format(clients[0]))   
                     TCPclient.close() 
+                    T_cls = self.display_clients()['terminal']
+                    self.listen_network(T_cls, 5, cycle, continous)
+                    
 
                 ###################################################################################################
                 
@@ -424,7 +419,7 @@ class PSD_Monitoring(object):
                             #print(RelayItem, "\n")
                             Relay_list = [Relay["TWJ"], Relay["KMJ"], Relay["GMJ"], Relay["MGJ"], Relay["QCJ"], Relay["LZLF"], Relay["KZKF"]]
                             # Gertting notes and adding it to data set
-                            Note = self.alarm_notes(Relay_list)
+                            Note = self.alarm_notes(Relay_list, RelayItem['组号'])
                             # To build data set
                             door_set = \
                             {
@@ -500,7 +495,32 @@ class PSD_Monitoring(object):
             pass
             #"终端{}连接异常".format(clients[0])
             TCPclient.close() 
-
+            
+                
+    
+    def listen_network(self, T_cls, T, cycle, continous):  
+        connect_flag = True
+        while True:
+            time.sleep(T)
+            try:       
+                if connect_flag:
+                    for cls in T_cls.keys():
+                        clients = [cls, T_cls[cls]['host'], T_cls[cls]['port']]
+                        # starting thread to collect data
+                        terminal_thread = threading.Thread(target=self.main, kwargs={'clients': clients, 'cycle': cycle, 'continous': continous})
+                        terminal_thread.start()
+                        connect_flag = False 
+                else:
+                    # created socket object 
+                    sk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  
+                    sk.connect((T_cls[cls]['host'], T_cls[cls]['port'])) 
+                    print('网络连接成功')  
+                    
+            except socket.error as e:  
+                print('网络不通，错误信息：', e)  
+            finally:  
+                sk.close()
+                
     
     def run(self, cycle, continous):    
         # conncting to the Influxdb 
@@ -508,21 +528,9 @@ class PSD_Monitoring(object):
         # ModbusTCP connecting and create threads one by one
         print("starting thread")
         T_cls = self.display_clients()['terminal']
-        connect_flag = True
-        
-        while True:
-            if connect_flag:
-                for cls in T_cls.keys():
-                    clients = [cls, T_cls[cls]['host'], T_cls[cls]['port']]
-                    # starting thread to collect data
-                    terminal_thread = threading.Thread(target=self.main, kwargs={'clients': clients, 'cycle': cycle, 'continous': continous})
-                    terminal_thread.start()
-                    connect_flag = False     
-            else:
-                self.listen_network(T_cls[cls]['host'], T_cls[cls]['port'], 5)
-                    
-            
-        
+        self.listen_network(T_cls, 5, cycle, continous)
+
+                
 if __name__ == "__main__":
     # starting up Influxdb 
     os.chdir('D:\\InfluxDB\\influxdb-1.7.7-1')
