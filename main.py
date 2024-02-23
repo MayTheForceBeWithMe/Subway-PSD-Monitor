@@ -27,7 +27,8 @@ class PSD_Monitoring(object):
             "username":           self.display_clients()['database']['username'],
             "password":           self.display_clients()['database']['password'],
             'DBname-station':     self.display_clients()['database']['DBname-station'],
-            'DBname-train':       self.display_clients()['database']['DBname-train']
+            'DBname-train':       self.display_clients()['database']['DBname-train'],
+            "DBname-network":     self.display_clients()['database']['DBname-network']
         }
         self.station_client = {}
         self.server_client = {}
@@ -39,6 +40,7 @@ class PSD_Monitoring(object):
         self.collect_notes = None
         self.current_note = None
         self.q = queue.Queue() 
+        self.time_count = []
     
     
     
@@ -91,6 +93,7 @@ class PSD_Monitoring(object):
             DBpassword = dict_cfg['DatabaseClient']['password']
             DBname_station = dict_cfg['DatabaseClient']['DBname'][0]
             DBname_train = dict_cfg['DatabaseClient']['DBname'][1]
+            DBname_network = dict_cfg['DatabaseClient']['DBname'][2]
             dict_info = {
                 'terminal': 
                     T_dict,
@@ -100,7 +103,8 @@ class PSD_Monitoring(object):
                     'username': DBusername,
                     'password': DBpassword,
                     'DBname-station': DBname_station,
-                    'DBname-train': DBname_train
+                    'DBname-train': DBname_train,
+                    'DBname-network': DBname_network
                 }
             }
         return dict_info
@@ -291,6 +295,8 @@ class PSD_Monitoring(object):
             self.DBclient.create_database(self.database_info['DBname-station'])
             self.DBclient.drop_database(self.database_info['DBname-train'])   
             self.DBclient.create_database(self.database_info['DBname-train'])
+            self.DBclient.drop_database(self.database_info['DBname-network'])   
+            self.DBclient.create_database(self.database_info['DBname-network'])
             print('database connected')    
         except:
             print('database connect fail')           
@@ -354,23 +360,55 @@ class PSD_Monitoring(object):
         ]
         self.DBclient.write_points(train_data)
         
+        
+        
+        
+    def DataBase_network_send(self, DBname, deviceIP, connection_status, current_time):
+        self.DBclient.switch_database(DBname)
+        network_data = \
+         [
+            {
+                "measurement":             DBname,
+                "tags": 
+                {
+                    "DeviceIP":            deviceIP
+                },
+                "time":                    current_time,
+                "fields": 
+                {
+                    "connection_status":   connection_status
+   
+                }
+            }
+        ]
+        self.DBclient.write_points(network_data)
+        
     
      
     
-    def main(self, clients, cycle, continous):
+    def main(self, clients, cycle, continous, network_connect):
         TCPclient = ModbusTcpClient(clients[1], clients[2])
         change_flag = False
         train_num = 0 - 1
         dwell_time = 0
         pass_frequency = 0
-        beginning_time = timeit.default_timer()     
+        beginning_time = timeit.default_timer() 
         try:  
             while True:   
+                alarm_time = datetime.now()
+                alarm_time_UTC = datetime.utcnow()
                 if not TCPclient.connect():   
                     print("设备：{} 无法连接".format(clients[0]))   
                     TCPclient.close() 
+                    if network_connect:
+                        connection_status = "网络连接中断"
+                        DBname_network = self.database_info['DBname-network']
+                        self.time_count.append(alarm_time_UTC)
+                        self.DataBase_network_send(DBname_network, clients[1], connection_status, self.time_count[0])
+                        network_connect = False
                     T_cls = self.display_clients()['terminal']
                     self.listen_network(T_cls, 5, cycle, continous)
+                    
                     
                 ###################################################################################################
                 
@@ -407,7 +445,17 @@ class PSD_Monitoring(object):
                     }
                     
                 ###################################################################################################
-                    
+                
+                    # 判断网络是否连接
+                    if network_connect:
+                        connection_status = "网络已连接"
+                        DBname_network = self.database_info['DBname-network']
+                        self.DataBase_network_send(DBname_network, clients[1], connection_status, alarm_time_UTC)
+                        self.time_count.clear()
+                        network_connect = False
+                        
+                ###################################################################################################
+                        
                     # data connect
                     for i in range(1, 5):
                         for j in range(1, 20):
@@ -453,8 +501,6 @@ class PSD_Monitoring(object):
                                 DBname_station = self.database_info['DBname-station']
                                 DBname_train = self.database_info['DBname-train']
                                 Line = RelayItem['行车方向']
-                                alarm_time = datetime.now()
-                                alarm_time_UTC = datetime.utcnow()
                                 alert = None
                                 alert_mark = 1
                                       
@@ -517,9 +563,10 @@ class PSD_Monitoring(object):
                     for cls in T_cls.keys():
                         clients = [cls, T_cls[cls]['host'], T_cls[cls]['port']]
                         # starting thread to collect data
-                        terminal_thread = threading.Thread(target=self.main, kwargs={'clients': clients, 'cycle': cycle, 'continous': continous})
+                        network_connect = True
+                        terminal_thread = threading.Thread(target=self.main, kwargs={'clients': clients, 'cycle': cycle, 'continous': continous, 'network_connect': network_connect})
                         terminal_thread.start()
-                        connect_flag = False 
+                        print('正在连接网络')   
                 else:
                     # created socket object 
                     sk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  
