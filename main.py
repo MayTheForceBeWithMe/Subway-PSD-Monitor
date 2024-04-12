@@ -2,6 +2,7 @@ from pymodbus.client import ModbusTcpClient
 from influxdb_client import InfluxDBClient
 from influxdb_client.client.write_api import SYNCHRONOUS
 from influxdb import InfluxDBClient
+from collections import OrderedDict 
 from pydub import AudioSegment  
 from pydub.playback import play
 from datetime import datetime
@@ -9,6 +10,9 @@ from telnetlib import Telnet
 import threading
 import queue  
 import socket
+import psutil  
+import webbrowser
+import subprocess
 import time
 import timeit
 import json
@@ -19,19 +23,23 @@ import os
 class PSD_Monitoring(object):
     
     def __init__(self):
+        self.setting_addr = "D:/HMI_demo/2023project/subway/setting.json"
         self.data_sender = [] 
         self.database_info = \
         {
-            "host":               self.display_clients()['database']['host'],
-            "port":               self.display_clients()['database']['port'],
-            "username":           self.display_clients()['database']['username'],
-            "password":           self.display_clients()['database']['password'],
-            'DBname-station':     self.display_clients()['database']['DBname-station'],
-            'DBname-train':       self.display_clients()['database']['DBname-train'],
-            "DBname-network":     self.display_clients()['database']['DBname-network']
+            "host":                 self.display_clients()['database']['host'],
+            "port":                 self.display_clients()['database']['port'],
+            "username":             self.display_clients()['database']['username'],
+            "password":             self.display_clients()['database']['password'],
+            'DBname-station':       self.display_clients()['database']['DBname-station'],
+            'DBname-train':         self.display_clients()['database']['DBname-train'],
+            "DBname-network":       self.display_clients()['database']['DBname-network'],
+            "DBname-transimssion":  self.display_clients()['database']['DBname-transimssion']
         }
         self.station_client = {}
         self.server_client = {}
+        self.collect_ls = []
+        self.Relay_list = []
         self.collect_nop = []
         self.previous_data = []
         self.current_data = []
@@ -40,13 +48,25 @@ class PSD_Monitoring(object):
         self.collect_notes = None
         self.current_note = None
         self.q = queue.Queue() 
-        self.time_count = []
+        self.time_count_connect = []
+        self.relay_buff = []
+        self.relay_sort_ls = []
     
     
     
     def ff(self, result, time):
         result = hex(result)[2:]
         l = len(result)
+        if l == 1:
+           if   time == 'S':
+                return int("0x" + str(result[0:1]), base=16)
+           if   time == 'Q':
+                return int("0x" + str(0), base=16)
+        if l == 2:
+           if   time == 'S':
+                return int("0x" + str(result[0:2]), base=16)
+           if   time == 'Q':
+                return int("0x" + str(0), base=16)
         if l == 3:
             if time == 'Y' or time == 'D' or time == 'Q':
                 return int("0x" + str(result[1:3]), base=16)
@@ -57,9 +77,13 @@ class PSD_Monitoring(object):
                 return int("0x" + str(result[2:4]), base=16)
             if time == 'M' or time == 'H' or time == 'S':
                 return int("0x" + str(result[0:2]), base=16)
-        else:
-            if time == 'ms':
-                return int(str(result), base=16)
+        if time == 'ms':
+            if l == 3:
+                return int("0x" + str(result[0:3]), base=16)
+            if l == 2:
+                return int("0x" + str(result[0:2]), base=16)
+            if l == 1:
+                return int("0x" + str(result[0:1]), base=16)
             
     
     
@@ -78,7 +102,7 @@ class PSD_Monitoring(object):
     
     
     def display_clients(self):
-        with open(file="E:/involuser/PSDmonitor/HMI_demo/2023project/subway/setting.json", encoding='utf-8') as cfg:
+        with open(file=self.setting_addr, encoding='utf-8') as cfg:
             # getting config
             dict_cfg = json.load(cfg)
             T_dict = {}
@@ -94,6 +118,7 @@ class PSD_Monitoring(object):
             DBname_station = dict_cfg['DatabaseClient']['DBname'][0]
             DBname_train = dict_cfg['DatabaseClient']['DBname'][1]
             DBname_network = dict_cfg['DatabaseClient']['DBname'][2]
+            DBname_transimssion = dict_cfg['DatabaseClient']['DBname'][3]
             dict_info = {
                 'terminal': 
                     T_dict,
@@ -104,7 +129,8 @@ class PSD_Monitoring(object):
                     'password': DBpassword,
                     'DBname-station': DBname_station,
                     'DBname-train': DBname_train,
-                    'DBname-network': DBname_network
+                    'DBname-network': DBname_network,
+                    'DBname-transimssion': DBname_transimssion
                 }
             }
         return dict_info
@@ -112,7 +138,7 @@ class PSD_Monitoring(object):
             
             
     def GetTerminalAndChannel(self, get_terminal, get_channel):
-        with open(file="E:/involuser/PSDmonitor/HMI_demo/2023project/subway/setting.json", encoding='utf-8') as cfg:
+        with open(file=self.setting_addr, encoding='utf-8') as cfg:
             # getting config
             dict_cfg = json.load(cfg)
             T_total = dict_cfg['TerminalNum']
@@ -137,20 +163,19 @@ class PSD_Monitoring(object):
                         CH_k = CH[key]
                         if len(CH_k[1]) == 0:
                             continue
-                        #print(CH_k)
                         # 上下行
                         CH_k = [CH_k]
                         for item in CH_k:   
                             key_ = item[0]  
                             value_ = item[1]  
-                            if key_ == '上行':          
+                            if key_ == 'up':          
                                 if value_[2] == 'TWJ':   
                                     item[1][2] = 'TWJ'  
-                                value_.insert(2, '上行')
-                            elif key_ == '下行':        
+                                value_.insert(2, 'up')
+                            elif key_ == 'down':        
                                 if value_[2] == 'TWJ':     
                                     item[1][2] = 'TWJ'   
-                                value_.insert(2, '下行')
+                                value_.insert(2, 'down')
                         CH_k = CH_k[0]
                         CH_k[1].append(key)
                         J.append(CH_k[1])    
@@ -168,7 +193,7 @@ class PSD_Monitoring(object):
                         CH_result[key].append(J_value)  
                     else:  
                         CH_result[key] = [J_value]  
-                        
+                
                 CH = {'IP': IP, get_channel: CH_result}
                 return CH
             else:
@@ -178,7 +203,6 @@ class PSD_Monitoring(object):
     
     def RelayGroup(self, Tx, CHx, Num):
         # 准备挂载
-        RelayGroup0 = {'TWJ': None, 'KMJ': None, 'GMJ': None, 'MGJ': None, 'QCJ': None, 'LZLF': None, 'KZKF': None}
         try:
             ###### Channel #####
             CH = self.GetTerminalAndChannel(Tx, CHx)
@@ -190,15 +214,7 @@ class PSD_Monitoring(object):
             ###### RelayGroup and Node ######
             RelayGroup = {k[2] : k[3] for k in CH_ls}  
             R = RelayGroup.keys()
-            sorted_R = sorted(R, key=lambda x: ['TWJ', 'KMJ', 'GMJ', 'MGJ', 'QCJ', 'LZLF', 'KZKF'].index(x)) 
-            RelayGroup = {k: RelayGroup[k] for k in sorted_R}
-            if len(RelayGroup) < 7 and len(RelayGroup) > 0:
-                RelayGroup0.update(RelayGroup)
-                RelayGroup = RelayGroup0
-            elif len(RelayGroup) == 7:
-                pass
-            else:
-                RelayGroup = None
+            RelayGroup = {k: RelayGroup[k] for k in R}
             RelayGroup = {'站点': StationName, '行车方向': LineDirection, '所用通道': CHx, '组号': Num, '继电器序列': RelayGroup}
             return RelayGroup
         except:
@@ -208,7 +224,7 @@ class PSD_Monitoring(object):
      
                               
     def Alarm_Audio(self):  
-        with open("E:/involuser/PSDmonitor/HMI_demo/2023project/subway/setting.json", encoding='utf-8') as cfg:
+        with open(file=self.setting_addr, encoding='utf-8') as cfg:
             dict_cfg = json.load(cfg)
             audio_file = dict_cfg["AudioFile"]
             # Playing alarm audio
@@ -231,60 +247,7 @@ class PSD_Monitoring(object):
         else:
             return True
             
-         
-                
-    def alarm_notes(self, collect):
-        # data alarm processing
-        self.collect_nop.append([collect[0], collect[1], collect[2], collect[3], collect[4], collect[5], collect[6]])
-        collect_list = self.collect_nop
-        if len(collect_list) == 3:
-                # getting data from previous status and current status
-                self.previous_data =  self.collect_nop[0]
-                self.current_data = self.collect_nop[1]
-                self.previous_data = list(map(int, self.collect_nop[0]))
-                self.current_data = list(map(int, self.collect_nop[1]))
-                collect_list.pop(0)
-                # the train has not arrived
-                if self.previous_data == [0, 0, 1, 1, 0, 1, 1] and self.current_data == [0, 0, 1, 1, 0, 1, 1]:
-                    return '无列车停靠'
-                # response signal from the action of the PSD when a train arriving 
-                elif (self.previous_data == [0, 0, 1, 1, 0, 1, 1] and self.current_data == [1, 0, 1, 0, 0, 1, 1]) or \
-                    (self.previous_data == [1, 0, 1, 1, 0, 1, 1] and self.current_data == [1, 0, 1, 1, 0, 1, 1]):
-                    return '列车停稳'
-                elif (self.previous_data == [1, 0, 1, 0, 0, 1, 1] and self.current_data == [1, 1, 0, 0, 0, 1, 1]) or \
-                    (self.previous_data == [1, 1, 0, 0, 0, 1, 1] and self.current_data == [1, 1, 0, 0, 0, 1, 1]):
-                    return '开门'
-                elif (self.previous_data == [1, 1, 0, 0, 0, 1, 1] and self.current_data == [1, 0, 1, 0, 0, 1, 1]) or \
-                    (self.previous_data == [1, 0, 1, 0, 0, 1, 1] and self.current_data == [1, 0, 1, 0, 0, 1, 1]):
-                    return '关门'
-                elif (self.previous_data == [1, 0, 1, 0, 0, 1, 1] and self.current_data == [1, 0, 1, 1, 0, 1, 1]) or \
-                    (self.previous_data == [1, 0, 1, 1, 0, 1, 1] and self.current_data == [1, 0, 1, 1, 0, 1, 1]):
-                    return '门关好'
-                elif (self.previous_data == [1, 0, 1, 1, 0, 1, 1] and self.current_data == [0, 0, 1, 1, 0, 1, 1]) or \
-                    (self.previous_data == [0, 0, 1, 1, 0, 1, 1] and self.current_data == [0, 0, 1, 1, 0, 1, 1]):
-                    return '列车发车'
-                # abnormal alert
-                # elif (self.previous_data[:4] == [0, 0, 0, 0] and self.current_data[:4] == [0, 0, 0, 0]) or \
-                #     (self.previous_data[:4] == [1, 1, 1, 1] and self.current_data[:4] == [1, 1, 1, 1]):
-                #     return '输入异常'
-                elif (self.previous_data == [0, 0, 1, 1, 0, 1, 1] and self.current_data == [1, 1, 0, 1, 0, 1, 1]) or \
-                    (self.previous_data == [1, 1, 0, 1, 0, 1, 1] and self.current_data == [1, 1, 0, 1, 0, 1, 1]):
-                    #self.Alarm_Audio()
-                    return '门关好异常落下'
-                elif (self.previous_data[5] == 1 and self.current_data[5] == 0) or \
-                    (self.previous_data[5] == 0 and self.current_data[5] == 0):
-                    #self.Alarm_Audio()
-                    return '机电电源异常'
-                elif (self.previous_data[6] == 1 and self.current_data[6] == 0) or \
-                    (self.previous_data[6] == 0 and self.current_data[6] == 0):
-                    #self.Alarm_Audio()
-                    return '信号电源异常'
-                else:
-                    return '数据异常'
-        else:
-            return None
-        
-        
+
                     
     def DataBase_connect(self, HOST, PORT, USER, PASSWORD):
         try:
@@ -297,47 +260,16 @@ class PSD_Monitoring(object):
             self.DBclient.create_database(self.database_info['DBname-train'])
             self.DBclient.drop_database(self.database_info['DBname-network'])   
             self.DBclient.create_database(self.database_info['DBname-network'])
+            self.DBclient.drop_database(self.database_info['DBname-transimssion'])   
+            self.DBclient.create_database(self.database_info['DBname-transimssion'])
             print('database connected')    
         except:
             print('database connect fail')           
    
-   
-                           
-    def DataBase_door_send(self,DBname, deviceIP, channel, line, door, alert, alert_mark, current_time):
-        # send data to data base
-        self.DBclient.switch_database(DBname) 
-        monitor_data = \
-        [
-            {
-                "measurement":             DBname,
-                "tags": 
-                {
-                    "alert":               alert
-                },
-                "time":                    current_time,
-                "fields": 
-                {
-                    "TWJ":                 door['TWJ'],
-                    "KMJ":                 door['KMJ'],
-                    "GMJ":                 door['GMJ'],
-                    "MGJ":                 door['MGJ'],
-                    "QCJ":                 door['QCJ'],
-                    "LZLF":                door['LZLF'],
-                    "KZKF":                door['KZKF'],
-                    "Note":                door['Note'],
-                    "Channel":             door['Channel'],
-                    "Station":             door['Station'],
-                    "DeviceIP":            deviceIP,
-                    "Line":                line,
-                    "AlertMark":           alert_mark         
-                }
-            }
-        ]
-        self.DBclient.write_points(monitor_data)
         
+    ##################################################################################################################     
         
-        
-    def DataBase_train_send(self,DBname, deviceIP, Channel, line, train_num, dell_time, pass_frequency):
+    def DataBase_train_send(self, DBname, deviceIP, Channel, line, train_num, dell_time, pass_frequency):
         # send data to data base
         self.DBclient.switch_database(DBname) 
         train_data = \
@@ -359,9 +291,8 @@ class PSD_Monitoring(object):
             }
         ]
         self.DBclient.write_points(train_data)
-        
-        
-        
+           
+    ##################################################################################################################     
         
     def DataBase_network_send(self, DBname, deviceIP, connection_status, current_time):
         self.DBclient.switch_database(DBname)
@@ -374,41 +305,80 @@ class PSD_Monitoring(object):
                     "DeviceIP":            deviceIP
                 },
                 "time":                    current_time,
-                "fields": 
+                "fields":                 
                 {
                     "connection_status":   connection_status
-   
                 }
             }
         ]
         self.DBclient.write_points(network_data)
         
+    ##################################################################################################################   
+        
+    def DataBase_transimaission_send(self, DBname, deviceIP, MegaByte, current_time):
+        self.DBclient.switch_database(DBname)
+        transimaission_data = \
+         [
+            {
+                "measurement":             DBname,
+                "tags": 
+                {
+                    "DeviceIP":            deviceIP
+                },
+                "time":                    current_time,
+                "fields":                 
+                {
+                    "MegaByte":            MegaByte
+                }
+            }
+        ]
+        self.DBclient.write_points(transimaission_data)
     
      
     
-    def main(self, clients, cycle, continous, network_connect):
+    def main(self, clients, cycle, continous, print_info, network_connect_flag, base_time):
         TCPclient = ModbusTcpClient(clients[1], clients[2])
         change_flag = False
-        train_num = 0 - 1
+        train_num = 0
         dwell_time = 0
         pass_frequency = 0
+        count_num = 0
         beginning_time = timeit.default_timer() 
-        try:  
-            while True:   
+        
+        while True:  
+            try:
                 alarm_time = datetime.now()
-                alarm_time_UTC = datetime.utcnow()
+                if base_time:
+                    alarm_time_UTC = datetime.utcnow()
+                count_num += 1
+
+                ##################################################################################################
+                
+                DBname_transimssion = self.database_info['DBname-transimssion']
+                io = psutil.net_io_counters() 
+                bytes_received = io.bytes_recv
+            
+                ##################################################################################################
+                
                 if not TCPclient.connect():   
-                    print("设备：{} 无法连接".format(clients[0]))   
+                    print("设备：{} 无法连接".format(clients[0]))  
                     TCPclient.close() 
-                    if network_connect:
-                        connection_status = "网络连接中断"
-                        DBname_network = self.database_info['DBname-network']
-                        self.time_count.append(alarm_time_UTC)
-                        self.DataBase_network_send(DBname_network, clients[1], connection_status, self.time_count[0])
-                        network_connect = False
+                    count_num = 0 
+                    MegaByte = 0  
+                    alarm_time_UTC  = datetime.utcnow()
+                    self.time_count_connect.append(alarm_time_UTC)
+                    connection_status = "网络连接中断"
+                    DBname_network = self.database_info['DBname-network']
+                    self.time_count_connect.append(alarm_time_UTC)
+                    self.DataBase_network_send(DBname_network, clients[1], connection_status, self.time_count_connect[0])
                     T_cls = self.display_clients()['terminal']
-                    self.listen_network(T_cls, 5, cycle, continous)
-                    
+                    self.listen_network(T_cls, 5, cycle, continous, base_time)             
+                else:
+                    MegaByte = bytes_received / (1024 * 1024)
+                alarm_time_UTC  = datetime.utcnow()
+                self.DataBase_transimaission_send(DBname_transimssion, clients[1], MegaByte, alarm_time_UTC)
+                if count_num == 1:
+                    network_connect_flag = True
                     
                 ###################################################################################################
                 
@@ -443,57 +413,48 @@ class PSD_Monitoring(object):
                         'CH3':   '{:016b}'.format(read_result[11]) + '{:016b}'.format(read_result[10]),
                         'CH4':   '{:016b}'.format(read_result[13]) + '{:016b}'.format(read_result[12])
                     }
-                    
+
+                    if base_time == False:
+                        alarm_time_UTC = datetime(2000 + data_item['Y'], data_item['M'], data_item['D'], data_item['H'] - 8, data_item['Q'], data_item['S'])
+                        alarm_time_UTC = alarm_time_UTC.strftime("%Y:%m:%d %H:%M:%S" + ".{}".format(data_item['ms']))
+              
                 ###################################################################################################
                 
                     # 判断网络是否连接
-                    if network_connect:
+                    self.time_count_connect.clear()
+                    if network_connect_flag:
+                        alarm_time_UTC  = datetime.utcnow()
+                        self.time_count_connect.append(alarm_time_UTC)
                         connection_status = "网络已连接"
                         DBname_network = self.database_info['DBname-network']
-                        self.DataBase_network_send(DBname_network, clients[1], connection_status, alarm_time_UTC)
-                        self.time_count.clear()
-                        network_connect = False
+                        self.DataBase_network_send(DBname_network, clients[1], connection_status, self.time_count_connect[0])
+                        network_connect_flag = False
                         
                 ###################################################################################################
                         
                     # data connect
-                    for i in range(1, 5):
+                    for i in range(1, 4):
                         for j in range(1, 20):
                             CH = 'CH' + str(i)                                   # 采集通道
-                            for k in range(20):
+                            for k in range(20):                                  # 组号
                                 RelayItem = self.RelayGroup(clients[0], CH, j)   # 获取目标端口
                                 Data = data_item[CH][::-1]                       # 将读取的32位二进制数据序列翻转
+                                with open(file=self.setting_addr, encoding='utf-8') as cfg:
+                                    dict_cfg = json.load(cfg) 
+                                port_info = dict_cfg["TerminalClient"]['T1']['channels'][CH]
+                                port_num = list(port_info.keys())
                                 # 若获取到的序列全为None则全部忽略
                                 if RelayItem['站点'] is None and RelayItem['行车方向'] is None and RelayItem['所用通道'] is None and RelayItem['组号'] is None and RelayItem['继电器序列'] is None:
                                     continue
                                 # 将获取到的端口对应到数据位
                                 if k != RelayItem['组号']:
                                     pass
-                                self.data_connect(RelayItem, Data)         
-                                Relay = RelayItem['继电器序列']
-                                #print(RelayItem, "\n")
-                                Relay_list = [Relay["TWJ"], Relay["KMJ"], Relay["GMJ"], Relay["MGJ"], Relay["QCJ"], Relay["LZLF"], Relay["KZKF"]]
-                                # Getting notes and adding it to data set
-                                Note = self.alarm_notes(Relay_list)
-                                # To build data set
-                                door_set = \
-                                {
-                                    "TWJ":      int(Relay["TWJ"]), 
-                                    "KMJ":      int(Relay["KMJ"]), 
-                                    "GMJ":      int(Relay["GMJ"]),
-                                    "MGJ":      int(Relay["MGJ"]),
-                                    "QCJ":      int(Relay["QCJ"]),
-                                    "LZLF":     int(Relay["LZLF"]), 
-                                    "KZKF":     int(Relay["KZKF"]),
-                                    "Note":     Note,
-                                    "Channel":  RelayItem['所用通道'],
-                                    "Station":  RelayItem['站点'],
-                                }
-                 
-                ###################################################################################################
-                
-                                # Getting effective data to database
-                                change_flag = True
+                                self.data_connect(RelayItem, Data) 
+                                R = RelayItem['继电器序列']
+                                R_keys = list(R.keys())
+                                Relay_key = list(R.keys()) 
+                                Relay_value = list(R.values())
+                                Relay_value = [int(val) for val in Relay_value] 
                                 device_IP = clients[1]
                                 Channel = CH
                                 StationName = RelayItem['站点']
@@ -501,61 +462,91 @@ class PSD_Monitoring(object):
                                 DBname_station = self.database_info['DBname-station']
                                 DBname_train = self.database_info['DBname-train']
                                 Line = RelayItem['行车方向']
-                                alert = None
-                                alert_mark = 1
-                                      
-                                if Note is not None and Note != "数据异常": 
-                                    try:
-                                        # alarm working only for data changes and then writing to database
-                                        if change_flag:
-                                            if self.upload(door_set['Note'], continous):
-                                                print("\n站点：{} - {}\t报警时间：{}\t采集卡终端IP：{}\t编号：{}-{}\t上报数据：{}".format(StationName, Line, alarm_time, device_IP, Channel, GroupNum ,door_set))
-                                                self.door_nop.append(door_set['Note'])
-                                                door_list = self.door_nop
-                                                if len(door_list) == 3:
-                                                    door_list.pop(0)
-                                                if door_list[0] == '无列车停靠' and door_list[1] == '列车停稳':
-                                                    train_arriving_time = timeit.default_timer() 
-                                                if door_list[0] == '列车停稳' and door_list[1] == '开门':
-                                                    # train dwell time or train pass frequency in the station ever 10 minutes
-                                                    train_num += 1
-                                                    train_departing_time = timeit.default_timer()
-                                                    dwell_time = train_departing_time - train_arriving_time
-                                                if door_list[0] == '门关好' and door_list[1] == '列车发车':
-                                                    print("\n----------------------------------------下一辆列车-----------------------------------------------")
-                                                    print("\n---------------------------------------屏蔽门正常动作--------------------------------------------")
-                                                if door_list[1] == '机电电源异常' or door_list[1] == '信号电源异常' or door_list[1] == '门关好异常落下':
-                                                    alert = '异常' 
-                                                    alert_mark = 0 
-                                                else:
-                                                    alert = '无异常' 
-                                                    alert_mark = 1
-                                                self.DataBase_door_send(DBname_station, device_IP, Channel, Line, door_set, alert, alert_mark, alarm_time_UTC)
-                                                self.DataBase_train_send(DBname_train, device_IP, Channel, Line, train_num, dwell_time, pass_frequency)
-                                        else:
-                                            # getting first data for the first time
-                                            self.DataBase_door_send(DBname_station, device_IP, Channel, Line, door_set, alert, alert_mark, alarm_time_UTC)
-                                            change_flag = True
-                                    except:          
-                                        pass
-                                elif Note == "数据异常":
-                                    pass
-                                else:
-                                    pass
-         
-                        time.sleep(cycle/1000)
-                else:
-                    pass
-                    #print("终端{}数据接收错误".format(clients[0]))     
-        except:
-            pass
-            #"终端{}连接异常".format(clients[0])
-            TCPclient.close() 
-            
-        
+                                door_set, base_set = {}, {}
+                                for key in Relay_key:    
+                                    if key in Relay_key: 
+                                        door_set[key] = int(R[key])
+                                # data alarm processing  
+                                action_logic = dict_cfg['ActionLogic']
+                                action_logic_num = dict_cfg['ActionLogic'][StationName]
+                                self.collect_nop.append(Relay_value)
+                                collect_list = self.collect_nop
+                                if len(collect_list) == 2:
+                                    # getting data from previous status and current status
+                                    self.previous_data =  self.collect_nop[0]
+                                    self.current_data = self.collect_nop[1]
+                                    self.previous_data = list(map(int, self.collect_nop[0]))
+                                    self.current_data = list(map(int, self.collect_nop[1]))
+                                    collect_list.pop(0)
+                                    collect = collect_list[0]
+
+                                    # 进入逻辑判断
+                                    for i in range(len(action_logic_num)):
+                                        relay, sequence = action_logic[StationName][str(i)]["relay"], action_logic[StationName][str(i)]["sequence"]
+                                        state, label = action_logic[StationName][str(i)]['state'], action_logic[StationName][str(i)]['label'] 
+                                        sequence, relay = OrderedDict(sorted(sequence.items())), OrderedDict(sorted(relay.items()))
+                                        sequence, relay = list(sequence.values()), list(relay.values())
+                                        label = int(label)
+                                         # 判断继电器序列中有无机电电源端口和信号电源端口   
+                                        power_label = ["LZLF", "KZKF"]
+                                        EM_power, S_power = int(collect[relay.index(power_label[0])]), int(collect[relay.index(power_label[1])])
+                                        if ((power_label[0] in R_keys) or (power_label[1] in R_keys)) and ((EM_power != 1) or (S_power != 1)):
+                                            alert = "abnormal"
+                                            alert_mark = 0
+                                            door_set["AlertMark"] = alert_mark
+                                            # 判断机电电源和信号电源是否异常
+                                            if (EM_power != 1) and (S_power == 1):
+                                                state = "EM-power-abnormal"
+                                                door_set["Note"] = state
+                                            if (EM_power == 1) and (S_power != 1):
+                                                state = "S-power-abnormal"
+                                                door_set["Note"] = state              
+                                            if (EM_power != 1) and (S_power != 1):
+                                                state = "EM/S-power-abnormal"
+                                                door_set["Note"] = state
+                                        # 判断动作状态
+                                        if len(sequence) == len(collect) and (all(sequence == collect for sequence, collect in zip(sequence, collect)) and (label == 1)):
+                                            door_set["Note"] = state
+                                            alert = "normal"
+                                            alert_mark = label 
+                                            door_set["AlertMark"] = alert_mark
+                                        if len(sequence) == len(collect) and (all(sequence == collect for sequence, collect in zip(sequence, collect)) and (label == 0)):
+                                            door_set["Note"] = state
+                                            alert = "abnormal"
+                                            alert_mark = label
+                                            door_set["AlertMark"] = alert_mark
                 
-    def listen_network(self, T_cls, T, cycle, continous):  
+                ##################################################################################################
+                                        # 整理成统一形式
+                                        door_set["StationName"] = StationName
+                                        door_set["Channel"] = Channel
+                                        door_set["deviceIP"] = device_IP
+                                        base_set["measurement"] = DBname_station
+                                        base_set["tags"] = {"alert": alert, "line": Line}
+                                        base_set["time"] = alarm_time_UTC
+                                        base_set["fields"] = door_set
+                                        # Getting effective data to database
+                                        monitor_data = [base_set]
+                                        # 送入“station”数据库
+                                        self.DBclient.switch_database(DBname_station) 
+                                        self.DBclient.write_points(monitor_data)
+                                       # print(monitor_data)
+                                        if print_info:
+                                            print("\n站点：{} - {}\t报警时间：{}\t状态：{}\t采集卡终端IP：{}\t编号：{}-{}\t上报数据：{}".format(StationName, Line, alarm_time, alert, device_IP, Channel, GroupNum ,door_set))
+                                
+            except:
+                #pass
+                #"终端{}连接异常".format(clients[0])
+                print('正在连接网络')
+                if TCPclient is not None:
+                    TCPclient.close()
+                
+                ##################################################################################################                
+                
+              
+    def listen_network(self, T_cls, T, cycle, continous, print_info, base_time):  
         connect_flag = True
+        sk = None
         while True:
             time.sleep(T)
             try:       
@@ -563,10 +554,10 @@ class PSD_Monitoring(object):
                     for cls in T_cls.keys():
                         clients = [cls, T_cls[cls]['host'], T_cls[cls]['port']]
                         # starting thread to collect data
-                        network_connect = True
-                        terminal_thread = threading.Thread(target=self.main, kwargs={'clients': clients, 'cycle': cycle, 'continous': continous, 'network_connect': network_connect})
+                        network_connect_flag = True
+                        terminal_thread = threading.Thread(target=self.main, kwargs={'clients': clients, 'cycle': cycle, 'continous': continous, 'print_info': print_info, 'network_connect_flag': network_connect_flag, 'base_time': base_time})
                         terminal_thread.start()
-                        print('正在连接网络')   
+                        time.time(1)
                 else:
                     # created socket object 
                     sk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  
@@ -576,18 +567,18 @@ class PSD_Monitoring(object):
             except socket.error as e:  
                 print('网络不通，错误信息：', e)  
             finally:  
-                #sk = socket.socket(socket.AF_INET, socket.SOCK_STREAM) 
-                sk.close()
+                # 如果不为空则close
+                if sk is not None:
+                    sk.close()
                 
-    
-    
-    def run(self, cycle, continous):    
+
+    def run(self, cycle, continous, print_info, base_time):    
         # conncting to the Influxdb 
         self.DataBase_connect(self.database_info['host'], self.database_info['port'], self.database_info['username'], self.database_info['password'])
-        # ModbusTCP connecting and create threads one by one
+        # ModbusTCP connecting and create threads in listenning network loop one by one
         print("starting thread")
         T_cls = self.display_clients()['terminal']
-        self.listen_network(T_cls, 5, cycle, continous)
+        self.listen_network(T_cls, 5, cycle, continous, print_info, base_time)
 
             
                 
@@ -597,10 +588,14 @@ if __name__ == "__main__":
     os.popen('influxd.exe -config influxdb.conf') 
     os.popen('influx.exe') 
     time.sleep(2)
-    # # starting up Grafana
+    # starting up Grafana
     os.chdir('D:\\grafana-enterprise-10.2.0.windows-amd64\\grafana-10.2.0\\bin')
-    os.popen('grafana-server') 
+    os.popen('grafana-server.exe') 
     time.sleep(2)
+    # open to the Web
+    url = 'http://127.0.0.1/srp-frame-example-pbm/pbm/index.html'
+    chrome_path = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' 
+    subprocess.Popen([chrome_path, url])
     # starting up terminal
     terminal = PSD_Monitoring()
-    terminal.run(cycle=200, continous=False)
+    terminal.run(cycle=200, continous=False, print_info=False, base_time=True)
