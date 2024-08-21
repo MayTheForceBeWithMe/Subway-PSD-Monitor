@@ -401,12 +401,7 @@ class PSD_Monitoring(object):
 
     def Modbustcp_close(self):
         self.TCPclient.close()
-
-
-    def database_separation_table(self, mst, x):
-        
-        
-        
+           
     ##################################################################################################################   
     
     def main(self, clients, cycle, continous, network_connect_flag, base_time):
