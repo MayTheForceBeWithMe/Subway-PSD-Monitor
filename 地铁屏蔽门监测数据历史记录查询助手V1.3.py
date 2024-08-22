@@ -9,9 +9,10 @@ from matplotlib.ticker import MaxNLocator
 import matplotlib.dates as mdates
 import subprocess
 import psutil
+import pytz 
 import atexit 
 import msvcrt 
-from datetime import datetime, timedelta 
+from datetime import datetime, timedelta, timezone  
 from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QLineEdit, QPushButton, QDateTimeEdit, QHBoxLayout, QTableWidget, QTableWidgetItem, QMessageBox, QComboBox, QFileDialog, QLabel
 from PyQt5.QtCore import QDateTime, Qt
 from PyQt5.QtWidgets import *
@@ -24,6 +25,7 @@ from openpyxl import Workbook
 
 
 
+now = datetime.now() 
 
 def CheckIsInTimeRange(x,st,end):
     t = pd.Timestamp(x)
@@ -36,11 +38,9 @@ class HistoryBrowser(QMainWindow):
     def __init__(self):
         self.plot_title = "" 
         self.time_buf = []
-        self.date_buf = []
         self.relay_buf = []
         self.data_row_col_buf = []
         self.row_buf = []
-        self.date_buf = []
         self.point_buf = []
         self.excel_data_buf = []
         self.data_split_buf = 0
@@ -135,18 +135,24 @@ class HistoryBrowser(QMainWindow):
         self.chart_view = QChartView(self.chart)
         self.chart_view.setRenderHint(QPainter.Antialiasing)
 
-        self.from_date = QDateTimeEdit()
-        self.from_date.setCalendarPopup(True)
-        self.from_date.setDisplayFormat("yyyy/MM/dd HH:mm:ss")
-        self.from_date.setDateTime(QDateTime.currentDateTime().addDays(-1))  # 默认开始时间为当前时间前一天
+        # self.from_date = QDateTimeEdit()
+        # self.from_date.setCalendarPopup(True)
+        # self.from_date.setDisplayFormat("yyyy/MM/dd HH:mm:ss")
+        # self.from_date.setDateTime(QDateTime.currentDateTime().addDays(-1))  # 默认开始时间为当前时间前一天
      
-        
+        # self.to_date = QDateTimeEdit()
+        # self.to_date.setCalendarPopup(True)
+        # self.to_date.setDisplayFormat("yyyy/MM/dd HH:mm:ss")
+        # self.to_date.setDateTime(QDateTime.currentDateTime())  # 默认结束时间为当前时间
 
-        self.to_date = QDateTimeEdit()
-        self.to_date.setCalendarPopup(True)
-        self.to_date.setDisplayFormat("yyyy/MM/dd HH:mm:ss")
-        self.to_date.setDateTime(QDateTime.currentDateTime())  # 默认结束时间为当前时间
+        self.to_date = QLineEdit(self)
+        formatted_time = now.strftime("%Y-%m-%d %H:%M:%S") 
+        self.to_date.setText(formatted_time) 
 
+        self.from_date = QLineEdit(self)
+        yesterday = now - timedelta(days=1)  
+        formatted_yesterday = yesterday.strftime("%Y-%m-%d %H:%M:%S")
+        self.from_date.setText(formatted_yesterday) 
 
         self.set_query_check = QCheckBox("设定24H查询范围")
         self.set_query_check.stateChanged.connect(self.query_check)
@@ -399,12 +405,12 @@ class HistoryBrowser(QMainWindow):
         first_point_buf = self.read_result_data(first_point)
         for fp in first_point_buf:
             all_point_buf.append(fp)
-        # middle point
-        middle_point = [mp for mp in result_point[1:-1]]
-        middle_point_buf_ls = [mp for mp in self.read_result_data(middle_point)]
-        for middle_point_buf in middle_point_buf_ls:
-            for mp in middle_point_buf:
-                all_point_buf.append(mp) 
+        # # middle point
+        # middle_point = [mp for mp in result_point[1:-1]]
+        # middle_point_buf_ls = [mp for mp in self.read_result_data(middle_point)]
+        # for middle_point_buf in middle_point_buf_ls:
+        #     for mp in middle_point_buf:
+        #         all_point_buf.append(mp) 
         # last point
         last_point = result_point[len(result_point)-1]
         last_point_buf = self.read_result_data(last_point)
@@ -458,12 +464,6 @@ class HistoryBrowser(QMainWindow):
         self.table.setUpdatesEnabled(False)
         data_split_buf = self.data_split_buf[page_num-1]
         self.data_group_buf = self.table_data_change(data_split_buf)
-        # # 时间随动
-        # self.import_time_start, self.import_time_end = self.data_group_buf[0][0], self.data_group_buf[-1][0]
-        # self.import_time_start = datetime.strptime(self.import_time_start.split('.')[0]  , "%Y-%m-%d %H:%M:%S") 
-        # self.import_time_end = datetime.strptime(self.import_time_end.split('.')[0]  , "%Y-%m-%d %H:%M:%S")  
-        # self.from_date.setDateTime(self.import_time_start)
-        # self.to_date.setDateTime(self.import_time_end) 
         # 清空现有的表格内容
         self.table.clearContents()
         # 设置表格的行数和列数
@@ -525,67 +525,71 @@ class HistoryBrowser(QMainWindow):
         
 ###########################################################################################################################################         
 
-    def CrossingDayAndSplicingTable(self, start_datetime_info, end_datetime_info, query_day_range):
-        start_datetime = datetime.strptime(start_datetime_info, '%Y-%m-%dT%H:%M:%SZ')
-        end_datetime = datetime.strptime(end_datetime_info, '%Y-%m-%dT%H:%M:%SZ')
-        start_day = start_datetime.day
-        end_day = end_datetime.day
-        delta = end_datetime - start_datetime  
+    def CrossingDayAndSplicingTable(self, query_day_range):
+        start_day = self.to_day
+        end_day = self.from_day
+        delta = self.end_datetime_obj - self.start_datetime_obj  
         self.days_diff = delta.days  # 这将给出整数部分的天数差 
         total_seconds = delta.total_seconds()  
         if self.days_diff > query_day_range:
             QMessageBox.warning(self, '警告', "超过{}天范围，数据量过大".format(query_day_range), QMessageBox.Ok)
         else:
-            current_date = start_datetime  
-            while current_date < end_datetime:  
-                # 将datetime对象转换为仅包含日期的字符串，并添加到列表中  
-                date_str = current_date.date().isoformat()  
-                self.date_buf.append(date_str)  
-                # 增加一天  
-                current_date += timedelta(days=1)   
-                # 包括结束时间
-                if end_datetime.date() not in [datetime.strptime(d, '%Y-%m-%d').date() for d in self.date_buf]:  
-                    self.date_buf.append(end_datetime.date().isoformat()) 
-            start_datetime =  start_datetime.strftime('%Y-%m-%d')  
-            end_datetime = end_datetime.strftime('%Y-%m-%d') 
-            index_ = self.date_buf.index(end_datetime) 
-            self.date_buf.pop(index_)  
-            self.date_buf.append(end_datetime)  
+            start_datetime =  self.start_datetime_obj.strftime('%Y-%m-%d')  
+            end_datetime = self.end_datetime_obj.strftime('%Y-%m-%d') 
+            utc_start_datetime_obj = self.start_datetime_obj.replace(tzinfo=timezone.utc) if self.start_datetime_obj.tzinfo is None else self.start_datetime_obj.astimezone(timezone.utc)  
+            utc_end_datetime_obj = self.end_datetime_obj.replace(tzinfo=timezone.utc) if self.end_datetime_obj.tzinfo is None else self.end_datetime_obj.astimezone(timezone.utc)  
+            self.from_date_str = utc_start_datetime_obj.strftime("%Y-%m-%dT%H:%M:%SZ")  
+            self.to_date_str = utc_end_datetime_obj.strftime("%Y-%m-%dT%H:%M:%SZ") 
+            utc_offset = timedelta(hours=-8)  
+            self.from_date_str = (utc_start_datetime_obj + utc_offset).strftime("%Y-%m-%dT%H:%M:%SZ") 
+            self.to_date_str = (utc_end_datetime_obj + utc_offset).strftime("%Y-%m-%dT%H:%M:%SZ")
+            start_date = self.start_datetime_obj.date()
+            end_date = self.end_datetime_obj.date()
+            date_list = []  
+            current_date = start_date   
+            # 循环直到当前日期超过结束日期  
+            while current_date <= end_date:  
+                date_list.append(current_date.strftime('%Y-%m-%d'))  # 将日期添加到列表中  
+                current_date += timedelta(days=1)  # 递增日期  
             self.one_day_measurement = self.database
 
             ######################################逐个查询数据并拼接######################################
 
             # 查询天数判断
-            if (self.days_diff >= 1) and (datetime.now().day == self.s_day) and (datetime.now().day == self.e_day):
+            if (self.days_diff >= 1) and (datetime.now().day != start_day) and (datetime.now().day != end_day) and (start_day != end_day):
                 # 1天以上（后期优化）
                 self.merge_enable = True
 
                 self.crossing_multiple_days =True
                 # 历史某天跨天24H查询
-                self.date_buf = [date.replace('-', '') for date in self.date_buf] 
+                date_buf = [dat.replace('-', '') for dat in date_list] 
 
                 # 获取所有measurement表名称
-                self.measurement_buf = [self.database + "_" + date for date in self.date_buf] 
-                self.measurement_buf = [x for i, x in enumerate(self.measurement_buf) if x not in self.measurement_buf[:i]] 
+                if(self.days_diff == 1):
+                    measurement_buf = [data_ls for data_ls in date_buf] 
+                else:
+                    measurement_buf = [self.database + "_" + date for date in date_buf] 
+                    measurement_buf = [x for i, x in enumerate(measurement_buf) if x not in measurement_buf[:i]] 
 
                 # 首项measurement
-                first_measurement = self.measurement_buf[0]
+                first_measurement = measurement_buf[0]
                 first_query = f"SELECT * FROM {first_measurement} WHERE time >= '{self.from_date_str}' AND time < '{start_datetime}T15:59:59Z' AND StationName = \'{self.site}\' AND line = \'{self.direction}\'"
                 first_query = self.client.query(first_query)
                 first_point = first_query.get_points()
+                print(first_query)
 
                 # 尾项measurement
-                last_measurement = self.measurement_buf[len(self.measurement_buf)-1]
-                last_query = f"SELECT * FROM {last_measurement} WHERE time >= '{end_datetime}T16:00:00Z' AND time < '{self.to_date_str} AND StationName = \'{self.site}\' AND line = \'{self.direction}\'"
+                last_measurement = measurement_buf[len(measurement_buf)-1]
+                last_query = f"SELECT * FROM {last_measurement} WHERE time >= '{end_datetime}T16:00:00Z' AND time < '{self.to_date_str}' AND StationName = \'{self.site}\' AND line = \'{self.direction}\'"
                 last_query = self.client.query(last_query)
                 last_point = last_query.get_points()
+                print(last_query)
 
                 # 首项point
                 self.point_buf.append(first_point)
-
-                if (len(self.measurement_buf) > 2):
+                if (len(measurement_buf) > 2):
                     # 中间连续的measurement
-                    middle_measurement_buf = self.measurement_buf[1:-1]
+                    middle_measurement_buf = measurement_buf[1:-1]
                     for middle_measurement in middle_measurement_buf:
                         middle_query = f"SELECT * FROM {middle_measurement} WHERE StationName = \'{self.site}\' AND line = \'{self.direction}\'"
                         middle_query = self.client.query(middle_query)
@@ -596,34 +600,37 @@ class HistoryBrowser(QMainWindow):
                  # 尾项point
                 self.point_buf.append(last_point)
 
-                self.measurement_buf.clear()
                 return self.point_buf
  
 
             elif self.days_diff == 0:
                 # 单日查询，无需拼接
-                if (self.s_day == self.e_day) and (datetime.now().day != self.s_day) and (datetime.now().day != self.e_day):
+                if (start_day == end_day) and (datetime.now().day != start_day) and (datetime.now().day != end_day):
                     # 历史某天
                     self.one_day_measurement = self.one_day_measurement + "_" + end_datetime.replace('-', '') 
                     self.one_day_query = f"SELECT * FROM {self.one_day_measurement} WHERE time >= '{self.from_date_str}' AND time < '{self.to_date_str}' AND StationName = \'{self.site}\' AND line = \'{self.direction}\'"
-                elif (datetime.now().day == self.s_day) and (datetime.now().day == self.s_day):
+                    print(self.one_day_query)
+                elif (datetime.now().day == start_day) and (datetime.now().day == start_day):
                     # 当前天
                     self.one_day_query = f"SELECT * FROM {self.one_day_measurement} WHERE time >= '{self.from_date_str}' AND time < '{self.to_date_str}' AND StationName = \'{self.site}\' AND line = \'{self.direction}\'"
+                    print(self.one_day_query)
                 else:
                     # 历史某天
                     self.one_day_measurement = self.one_day_measurement + "_" + end_datetime.replace('-', '') 
                     self.one_day_query = f"SELECT * FROM {self.one_day_measurement} WHERE time >= '{self.from_date_str}' AND time < '{self.to_date_str}' AND StationName = \'{self.site}\' AND line = \'{self.direction}\'"
+                    print(self.one_day_query)
                 one_day_query = self.client.query(self.one_day_query)
                 result_point = one_day_query.get_points()
+                
                 return result_point
 
             else:
                 # 昨天和今天
                 self.one_day_query = f"SELECT * FROM {self.one_day_measurement} WHERE time >= '{self.from_date_str}' AND time < '{self.to_date_str}' AND StationName = \'{self.site}\' AND line = \'{self.direction}\'"
+                print(self.one_day_query)
                 one_day_query = self.client.query(self.one_day_query)
                 result_point = one_day_query.get_points()
                 return result_point
-
 
                 
 ###########################################################################################################################################         
@@ -654,118 +661,114 @@ class HistoryBrowser(QMainWindow):
 
     def query_data(self):
         self.q = True
-        # 获取列的数量  
+        # 获取列的数量  \
+        self.table.setRowCount(0)
         column_count = self.table.columnCount()  
         # 遍历所有列，将表头设置为空字符串  
         for column in range(column_count):  
             self.table.setHorizontalHeaderItem(column, QTableWidgetItem("")) 
+        time.sleep(0.5)
         if self.import_enable:
             self.site_select.clear()
             self.direction_select.clear()
             self.site_select.addItems(self.station)
             self.direction_select.addItems(["上行", "下行"])  
-            self.from_date.setDateTime(QDateTime.currentDateTime().addDays(-1))
-            self.to_date.setDateTime(QDateTime.currentDateTime())  
             self.import_enable = False
         self.pages_num = 1
         self.import_plot = False
-        start_datetime = self.from_date.dateTime()
-        end_datetime = self.to_date.dateTime()
-        start_datetime_info = start_datetime.toString("yyyy-MM-ddTHH:mm:ssZ")
-        end_datetime_info = end_datetime.toString("yyyy-MM-ddTHH:mm:ssZ")
-        self.s_day = datetime.strptime(start_datetime_info, '%Y-%m-%dT%H:%M:%SZ').day
-        self.e_day = datetime.strptime(end_datetime_info, '%Y-%m-%dT%H:%M:%SZ').day
-        self.from_date_str = start_datetime.toUTC().toString("yyyy-MM-ddTHH:mm:ssZ")
-        self.to_date_str = end_datetime.toUTC().toString("yyyy-MM-ddTHH:mm:ssZ")
-        from_date_timestamp = self.from_date.dateTime().toSecsSinceEpoch() * 1000
-        to_date_timestamp = self.to_date.dateTime().toSecsSinceEpoch() * 1000
-        from_date_timestamp_str = str(self.from_date.dateTime().toUTC().toSecsSinceEpoch() * 1000)
-        to_date_timestamp_str = str(self.to_date.dateTime().toUTC().toSecsSinceEpoch() * 1000)
-        now_day = datetime.now().date().day
-        now_month = datetime.now().date().month
-        self.from_day = datetime.strptime(self.from_date_str, '%Y-%m-%dT%H:%M:%SZ').day
-        self.to_day = datetime.strptime(self.to_date_str, '%Y-%m-%dT%H:%M:%SZ').day
-        from_day = datetime.strptime(self.from_date_str, '%Y-%m-%dT%H:%M:%SZ').strftime("%Y-%m-%d") 
-        to_day = datetime.strptime(self.to_date_str, '%Y-%m-%dT%H:%M:%SZ').strftime("%Y-%m-%d") 
-        self.from_day_t = datetime.strptime(self.from_date_str, '%Y-%m-%dT%H:%M:%SZ').strftime("%Y-%m-%d") 
-        self.to_day_t = datetime.strptime(self.to_date_str, '%Y-%m-%dT%H:%M:%SZ').strftime("%Y-%m-%d") 
-        from_month = datetime.strptime(self.from_date_str, '%Y-%m-%dT%H:%M:%SZ').month
-        to_month = datetime.strptime(self.to_date_str, '%Y-%m-%dT%H:%M:%SZ').month
-        from_date = datetime.strptime(from_day, "%Y-%m-%d")  
-        to_date = datetime.strptime(to_day, "%Y-%m-%d") 
-        diff_time = to_date - from_date
-        diff_time = diff_time.days  
-        self.site = self.site_select.currentText()
-        self.direction = self.direction_select.currentText()
-        to_day_in_future = ((now_day < self.to_day) and (now_month <= to_month))
-        from_day_in_future = ((now_day < self.from_day) and (now_month <= from_month))
-        self.all_pages_label.setText("当前第{}页 共{}页 ".format("  ", "  "))
+        start_datetime = self.from_date.text()
+        end_datetime = self.to_date.text()
+        # datetime
+        try:
+            self.start_datetime_obj = datetime.strptime(start_datetime, "%Y-%m-%d %H:%M:%S") 
+            self.end_datetime_obj = datetime.strptime(end_datetime, "%Y-%m-%d %H:%M:%S") 
+            self.from_day = self.start_datetime_obj.day
+            self.to_day = self.end_datetime_obj.day
+            self.from_month = self.start_datetime_obj.month
+            self.to_month = self.end_datetime_obj.month
+            now_day = now.day
+            now_month = now.month
+            diff_time = self.end_datetime_obj - self.start_datetime_obj
+            diff_time = diff_time.days  
+            self.site = self.site_select.currentText()
+            self.direction = self.direction_select.currentText()
+            to_day_in_future = ((now_day < self.to_day) and (now_month <= self.to_month))
+            from_day_in_future = ((now_day < self.from_day) and (now_month <= self.from_month))
+            self.all_pages_label.setText("当前第{}页 共{}页 ".format("  ", "  "))
      
   
-        # 从QDateTime对象中提取日期部分  
-        # 注意：QDate是从QDateTime中直接转换而来的，它只包含年、月、日  
+            # 从QDateTime对象中提取日期部分  
+            # 注意：QDate是从QDateTime中直接转换而来的，它只包含年、月、日  
 
     
-        self.table.setRowCount(0)  # 清空表格内容
-        self.chart.removeAllSeries()
-        series = QLineSeries()
-        previous_time = None
-        previous_value = None
+            self.table.setRowCount(0)  # 清空表格内容
+            self.chart.removeAllSeries()
+            series = QLineSeries()
+            previous_time = None
+            previous_value = None
     
-        if self.check_state == True:
-            month_is_same = (from_month == to_month)
-            in_diff_range = ((diff_time < 2) and (diff_time >= 0))
-        else:
-            month_is_same = True
-            in_diff_range = True
-        # 获取数据
-        if (to_day_in_future or from_day_in_future):
-            QMessageBox.warning(self, '警告', "无法查询未来时间的数据", QMessageBox.Ok)
-        else:    
-            if month_is_same and in_diff_range:
-                self.import_file = False
-                try:
-                    self.relay_channel = {self.station[self.site][self.direction]['name'][key]: value for key, value in self.station[self.site][self.direction]['channel'].items()} 
-                except:
-                    QMessageBox.critical(self, '错误', "当前选择的查询项有误", QMessageBox.Ok)
-                self.relay_buf.clear()
-                for key, value in self.relay_channel.items():  
-                    self.relay_buf.append(f"{key} (CH{value})")
-                self.relay_buf.insert(0, 'time')
-                self.relay_buf = self.remove_duplicates(self.relay_buf)
-                self.relay_mark_len = len(self.relay_buf)
-                self.table.setColumnCount(self.relay_mark_len)
-                self.table.setHorizontalHeaderLabels(self.relay_buf)
-                self.quary_enable = True
-                self.data_head = self.relay_chinese_name
-
-                self.databases_plot = True 
-                self.inside_plot = False
-                # 数据库数据
-                try:
-                    start_time = time.time()
-                    self.result_point = self.CrossingDayAndSplicingTable(self.from_date_str, self.to_date_str, 1)
-                    end_time = time.time()
-                    self.quary_time = end_time - start_time
-                    self.data_split_buf = self.data_split(self.from_Database(self.result_point))
-                    self.buffer_name = self.site + '_' + self.direction
-                    if self.pages_num == 1:
-                        self.display_data(self.pages_num)
-                    #QMessageBox.information(self, '查询完成', "查询时间为{}秒".format(self.quary_time), QMessageBox.Ok) 
-                    self.all_pages_label.setText("当前第{}页 共{}页".format(self.pages_num, self.pages_max))
-                    self.page_turn = True
-                except:
-                    if self.quary_null == False:
-                        QMessageBox.critical(self, '查询错误', "数据查询异常", QMessageBox.Ok) 
-                    else:
-                        self.quary_null = False
-
+            if self.check_state == True:
+                month_is_same = (self.from_month == self.to_month)
+                in_diff_range = ((diff_time < 2) and (diff_time >= 0))
             else:
-                if diff_time < 0:
-                    QMessageBox.warning(self, '警告', "查询时间范围设置有误", QMessageBox.Ok) 
+                month_is_same = True
+                in_diff_range = True
+            # 获取数据
+            if (to_day_in_future or from_day_in_future):
+                QMessageBox.warning(self, '警告', "无法查询未来时间的数据", QMessageBox.Ok)
+            else:    
+                if month_is_same and in_diff_range:
+                    self.import_file = False
+                    try:
+                        self.relay_channel = {self.station[self.site][self.direction]['name'][key]: value for key, value in self.station[self.site][self.direction]['channel'].items()} 
+                    except:
+                        QMessageBox.critical(self, '错误', "当前选择的查询项有误,自动返回上次查询", QMessageBox.Ok)
+                    self.relay_buf.clear()
+                    for key, value in self.relay_channel.items():  
+                        self.relay_buf.append(f"{key} (CH{value})")
+                    self.relay_buf.insert(0, 'time')
+                    self.relay_buf = self.remove_duplicates(self.relay_buf)
+                    self.relay_mark_len = len(self.relay_buf)
+                    self.table.setColumnCount(self.relay_mark_len)
+                    self.table.setHorizontalHeaderLabels(self.relay_buf)
+                    self.quary_enable = True
+                    self.data_head = self.relay_chinese_name
+
+                    self.databases_plot = True 
+                    self.inside_plot = False
+                    # 数据库数据
+                    try:
+                        start_time = time.time()
+                        self.result_point = self.CrossingDayAndSplicingTable(30)
+                        end_time = time.time()
+                        self.quary_time = end_time - start_time
+                        self.data_split_buf = self.data_split(self.from_Database(self.result_point))
+                        self.buffer_name = self.site + '_' + self.direction
+                        if self.pages_num == 1:
+                            self.display_data(self.pages_num)
+                        #QMessageBox.information(self, '查询完成', "查询时间为{}秒".format(self.quary_time), QMessageBox.Ok) 
+                        self.all_pages_label.setText("当前第{}页 共{}页".format(self.pages_num, self.pages_max))
+                        self.page_turn = True
+                    except:
+                        if self.quary_null == False:
+                            QMessageBox.critical(self, '查询错误', "数据查询异常", QMessageBox.Ok) 
+                        else:
+                            self.quary_null = False
+
                 else:
-                    QMessageBox.warning(self, '警告', "查询时间范围为24小时内", QMessageBox.Ok)
-        self.client.close()
+                    if diff_time < 0:
+                        QMessageBox.warning(self, '警告', "查询时间范围设置有误", QMessageBox.Ok) 
+                    else:
+                        QMessageBox.warning(self, '警告', "查询时间范围为24小时内", QMessageBox.Ok)
+            self.client.close()
+        except:
+            QMessageBox.critical(self, '错误', "查询时间输入格式有误", QMessageBox.Ok)
+            self.client.close()
+            formatted_time = now.strftime("%Y-%m-%d %H:%M:%S") 
+            self.to_date.setText(formatted_time) 
+            yesterday = now - timedelta(days=1)  
+            formatted_yesterday = yesterday.strftime("%Y-%m-%d %H:%M:%S")
+            self.from_date.setText(formatted_yesterday) 
 
 ###############################################################################################
 ###############################################################################################
@@ -779,19 +782,6 @@ class HistoryBrowser(QMainWindow):
         self.databases_plot = False
         self.import_file = True
         self.inside_plot = False
-        from_date_str = self.from_date.dateTime().toString("yyyy-MM-ddTHH:mm:ssZ")
-        to_date_str = self.to_date.dateTime().toString("yyyy-MM-ddTHH:mm:ssZ")
-        from_date_timestamp = self.from_date.dateTime().toSecsSinceEpoch() * 1000
-        to_date_timestamp = self.to_date.dateTime().toSecsSinceEpoch() * 1000
-        from_date_timestamp_str = str(self.from_date.dateTime().toUTC().toSecsSinceEpoch() * 1000)
-        to_date_timestamp_str = str(self.to_date.dateTime().toUTC().toSecsSinceEpoch() * 1000)
-        now_day = datetime.now().date().day
-        now_month = datetime.now().date().month
-        from_day = datetime.strptime(from_date_str, '%Y-%m-%dT%H:%M:%SZ').day
-        to_day = datetime.strptime(to_date_str, '%Y-%m-%dT%H:%M:%SZ').day
-        from_month = datetime.strptime(from_date_str, '%Y-%m-%dT%H:%M:%SZ').month
-        to_month = datetime.strptime(to_date_str, '%Y-%m-%dT%H:%M:%SZ').month
-        diff_time = to_day - from_day
         self.site = self.site_select.currentText()
         self.direction = self.direction_select.currentText()
         QMessageBox.information(self, '导入数据', "将会导入所选的整个文件，请选择规定格式的Excel文件", QMessageBox.Ok)
@@ -869,8 +859,6 @@ class HistoryBrowser(QMainWindow):
         self.direction_select.clear()
         self.site_select.addItems(self.station)
         self.direction_select.addItems(["上行", "下行"])          
-        self.from_date.setDateTime(QDateTime.currentDateTime().addDays(-1))
-        self.to_date.setDateTime(QDateTime.currentDateTime())  
 
 
     def plot_data(self):
@@ -923,6 +911,12 @@ class HistoryBrowser(QMainWindow):
         self.direction_select.clear()
         self.site_select.addItems(self.station)
         self.direction_select.addItems(["上行", "下行"]) 
+        formatted_time = now.strftime("%Y-%m-%d %H:%M:%S") 
+        self.to_date.setText(formatted_time) 
+        yesterday = now - timedelta(days=1)  
+        formatted_yesterday = yesterday.strftime("%Y-%m-%d %H:%M:%S")
+        self.from_date.setText(formatted_yesterday) 
+
 
 def app_close():
     # 释放文件锁
@@ -952,4 +946,3 @@ if __name__ == "__main__":
     browser.showMaximized()
     browser.client.close()
     sys.exit(app.exec_())
-
