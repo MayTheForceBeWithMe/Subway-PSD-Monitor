@@ -61,8 +61,7 @@ class HistoryBrowser(QMainWindow):
         self.page_next = True
         self.pages_num = 0
         self.pages_max = 0
-
-
+        self.total_data_size = 0
         self.setting_addr = "D:\\PSDmonitor\\profile\\SettingMenu.json"
         self.export_path = 'D:\\PSDmonitor\\InfluxDB\\export_data'
         self.folder_path = 'D:\\PSDmonitor\\InfluxDB\\influxdb-1.7.7-1'
@@ -87,7 +86,7 @@ class HistoryBrowser(QMainWindow):
         self.setWindowTitle("地铁屏蔽门监测数据历史记录查询助手")
         self.setWindowIcon(QIcon('favor.ico'))
         self.setGeometry(0, 0, 1200, 800)
-        self.showMaximized() 
+        # self.showMaximized() 
 
         # 检查是否已开启数据库
         self.kill_service_by_name('influxd.exe')
@@ -116,7 +115,6 @@ class HistoryBrowser(QMainWindow):
         self.data_select = QComboBox()
         self.data_select.addItems(["数据库", "外部文件"])
         
-
         self.items_select = QComboBox()
         self.items_select.addItems(["1000", "3000", "5000", "10000", "12000", "15000"])
         
@@ -206,7 +204,9 @@ class HistoryBrowser(QMainWindow):
         # self.item_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self.all_pages_label = QLabel("当前第{}页 共{}页".format(self.pages_max, self.pages_num), self)
         self.all_pages_label.setAlignment(Qt.AlignmentFlag.AlignLeft|Qt.AlignmentFlag.AlignVCenter)
-
+                   
+        self.all_data_label = QLabel("总量:  ")
+        self.all_data_label.setAlignment(Qt.AlignmentFlag.AlignLeft|Qt.AlignmentFlag.AlignVCenter)
     
 
         # 布局调整 第一行
@@ -235,6 +235,7 @@ class HistoryBrowser(QMainWindow):
         quary_pages.addWidget(self.goto_input)
         quary_pages.addWidget(page_label)
         quary_pages.addWidget(self.all_pages_label)
+        quary_pages.addWidget(self.all_data_label)
 
         quary_pages.addWidget(self.goto_page_button)
         quary_pages.addWidget(self.query_button)
@@ -381,7 +382,6 @@ class HistoryBrowser(QMainWindow):
                 QMessageBox.critical(self, '输入错误', "请输入正确页码", QMessageBox.Ok) 
     
 
-
     def read_result_data(self, result_data):
         row = 0  
         for point in result_data:  
@@ -394,7 +394,6 @@ class HistoryBrowser(QMainWindow):
                 columm += 1    
             row += 1
         return self.data_row_col_buf
-
 
 
     def merge_measurement(self, result_point):
@@ -415,12 +414,13 @@ class HistoryBrowser(QMainWindow):
         last_point = result_point[len(result_point)-1]
         last_point_buf = self.read_result_data(last_point)
         for lp in last_point_buf:
-            all_point_buf.append(lp)  
+            all_point_buf.append(lp) 
+        # 判断有无相同数据
+        all_point_buf = [x for i, x in enumerate(all_point_buf) if x not in all_point_buf[:i]] 
         self.merge_enable = False
         return all_point_buf
     
         
-
     def from_Excel(self, result_data):
         # 创建DataFrame列名到表头的映射
         rm1 = self.data_head.copy()
@@ -500,20 +500,21 @@ class HistoryBrowser(QMainWindow):
         if not data_buf:  
             return []  # 或者抛出异常  
         start_time = time.time()  
-        total_data_size = len(data_buf)  
+        self.total_data_size = len(data_buf)  
+        self.all_data_label.setText("总量：{}".format(self.total_data_size))
         items_per_block = items_max * (len(self.data_head) + 1)  
-        actual_items_per_block = min(items_per_block, total_data_size)  
+        actual_items_per_block = min(items_per_block, self.total_data_size)  
   
         # 计算实际划分块的数量  
         # 如果items_per_block能整除total_data_size，则直接计算；否则加1  
-        num_blocks = total_data_size // actual_items_per_block  
-        if total_data_size % actual_items_per_block > 0:  
+        num_blocks = self.total_data_size // actual_items_per_block  
+        if self.total_data_size % actual_items_per_block > 0:  
             num_blocks += 1  
   
         # 数据划分  
         self.data_split_buf = [  
             data_buf[i:i + actual_items_per_block]  
-            for i in range(0, total_data_size, actual_items_per_block)  
+            for i in range(0, self.total_data_size, actual_items_per_block)  
         ]  
   
         # 注意：这里的pages_max实际上是num_blocks，但命名可能根据上下文有所不同  
@@ -556,7 +557,7 @@ class HistoryBrowser(QMainWindow):
             ######################################逐个查询数据并拼接######################################
 
             # 查询天数判断
-            if (self.days_diff >= 1) and (datetime.now().day != start_day) and (datetime.now().day != end_day) and (start_day != end_day):
+            if ((self.days_diff >= 1) and (datetime.now().day != start_day) and (datetime.now().day != end_day) and (start_day != end_day)) or ((self.days_diff == 0) and (len(date_list) >= 2)):
                 # 1天以上（后期优化）
                 self.merge_enable = True
 
@@ -566,24 +567,27 @@ class HistoryBrowser(QMainWindow):
 
                 # 获取所有measurement表名称
                 if(self.days_diff == 1):
-                    measurement_buf = [data_ls for data_ls in date_buf] 
+                    measurement_buf = [self.database + "_" + data_ls for data_ls in date_buf] 
                 else:
                     measurement_buf = [self.database + "_" + date for date in date_buf] 
                     measurement_buf = [x for i, x in enumerate(measurement_buf) if x not in measurement_buf[:i]] 
+                print(measurement_buf)
 
                 # 首项measurement
                 first_measurement = measurement_buf[0]
                 first_query = f"SELECT * FROM {first_measurement} WHERE time >= '{self.from_date_str}' AND time < '{start_datetime}T15:59:59Z' AND StationName = \'{self.site}\' AND line = \'{self.direction}\'"
+                print(first_query)
                 first_query = self.client.query(first_query)
                 first_point = first_query.get_points()
-                print(first_query)
+                
 
                 # 尾项measurement
                 last_measurement = measurement_buf[len(measurement_buf)-1]
-                last_query = f"SELECT * FROM {last_measurement} WHERE time >= '{end_datetime}T16:00:00Z' AND time < '{self.to_date_str}' AND StationName = \'{self.site}\' AND line = \'{self.direction}\'"
+                last_query = f"SELECT * FROM {last_measurement} WHERE time >= '{start_datetime}T16:00:00Z' AND time < '{self.to_date_str}' AND StationName = \'{self.site}\' AND line = \'{self.direction}\'"
+                print(last_query)
                 last_query = self.client.query(last_query)
                 last_point = last_query.get_points()
-                print(last_query)
+                
 
                 # 首项point
                 self.point_buf.append(first_point)
@@ -603,7 +607,7 @@ class HistoryBrowser(QMainWindow):
                 return self.point_buf
  
 
-            elif self.days_diff == 0:
+            elif (self.days_diff == 0) and (len(date_list) == 1):
                 # 单日查询，无需拼接
                 if (start_day == end_day) and (datetime.now().day != start_day) and (datetime.now().day != end_day):
                     # 历史某天
@@ -943,6 +947,7 @@ if __name__ == "__main__":
         sys.exit(1)
     app = QApplication(sys.argv)
     browser = HistoryBrowser()
-    browser.showMaximized()
+    browser.show()
     browser.client.close()
     sys.exit(app.exec_())
+
