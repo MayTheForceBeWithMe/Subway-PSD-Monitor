@@ -1,5 +1,6 @@
 from pymodbus.client import ModbusTcpClient
 from pymodbus.register_write_message import WriteSingleRegisterRequest  
+from pymodbus.exceptions import ModbusException, ModbusIOException 
 from influxdb_client import InfluxDBClient
 from influxdb_client.client.write_api import SYNCHRONOUS
 from influxdb import InfluxDBClient
@@ -14,6 +15,7 @@ from pydub import AudioSegment
 from pydub.playback import play
 from pydub import AudioSegment
 from pypinyin import pinyin, Style
+from dateutil import parser 
 import pandas as pd 
 import pyautogui 
 import threading
@@ -33,18 +35,132 @@ from PIL import Image, ImageTk
 import psutil
 import atexit 
 import msvcrt 
+import fifobuffer as FIFO
+import  traceback
 
 
-logging.getLogger('influxdb').setLevel(logging.CRITICAL)  
-logging.getLogger('httpd').setLevel(logging.CRITICAL)   
-# 或者，如果你不确定具体的日志器名称，可以尝试禁用所有非警告级别的日志  
-logging.basicConfig(level=logging.CRITICAL)
+class Alarm(object):
+
+    def __init__(self):
+        self.write_cache_from_alert_note = FIFO.FIFOBufffer(1000)
+        self.write_cache_from_alert_settled = FIFO.FIFOBufffer(1000)
+
+    def alert_m(self, alr, station, line, current_time):
+        self.alert_mark = alr
+        self.station = station
+        self.line = line
+
+        alert_settled_data = \
+        {
+            "measurement":          "alert_settled",
+            "time":                 current_time,
+            "fields":
+            {
+                "恢复内容":         self.alert_mark,
+                "报警解除时间":     datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
+            },
+            "tags":
+            {
+                "行车方向":         self.line,
+                "站点":             self.station
+            }   
+        }
+        self.write_cache_from_alert_settled.push(alert_settled_data)
+
+    def alert_n(self, alr, station, line, current_time):
+        self.alert_note = alr
+        self.station = station
+        self.line = line
+
+        alert_record_data = \
+        {
+            "measurement":          "alert_record",
+            "time":                 current_time,
+            "fields":
+            {
+                "报警内容":          self.alert_note,
+                "报警响应时间":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
+            },
+            "tags":
+            {
+                "行车方向":          self.line,
+                "站点":              self.station
+            }   
+        }
+        self.write_cache_from_alert_note.push(alert_record_data)
+
+
+class PerformanceMonitoring(object):
+
+    def __init__(self):
+        self.write_cache_from_collect_data = FIFO.FIFOBufffer(1000)
+        self.write_cache_from_process_data = FIFO.FIFOBufffer(1000)
+        self.write_cache_from_sep_table_data = FIFO.FIFOBufffer(1000)
+        self.write_cache_from_write_db_data = FIFO.FIFOBufffer(1000)
+
+    def DataBase_collect_time_send(self, loop_time, current_time):
+        collect_time = \
+        {
+            "measurement":                  "collect_time",
+            "time":                         current_time,
+            "fields":
+            {
+                "采集周期":                loop_time,
+                "采集频率":                1/(loop_time/1000),
+            }
+        }
+        self.write_cache_from_collect_data.push(collect_time)
+
+    def DataBase_process_time_send(self, data_process_time, current_time):
+        process_time = \
+        {
+            "measurement":                  "process_time",
+            "time":                         current_time,
+            "fields":
+            {
+                "数据处理时间":              data_process_time
+            }
+        }
+        self.write_cache_from_process_data.push(process_time)
+    
+    def DataBase_sep_table_time_send(self, sep_table_time, current_time):
+        sep_time = \
+        {
+            "measurement":                  "sep_table_time",
+            "time":                         current_time,
+            "fields":
+            {
+                "数据库分表处理时间":         sep_table_time
+            }
+        }
+        self.write_cache_from_sep_table_data.push(sep_time)
+
+    def DataBase_write_time_send(self, write_time, current_time):
+        write_db_time = \
+        {
+            "measurement":                  "write_time",
+            "time":                         current_time,
+            "fields":
+            {
+                "写入数据库时间":            write_time
+            }
+        }
+        self.write_cache_from_write_db_data.push(write_db_time) 
+    
+    
 
 
 class PSD_Monitoring(object):
+    dict_cfg = {}
+    #DBclient_sep = None
+    DBclient_alert_settle = None
     
     def __init__(self):
         self.setting_addr = "D:\PSDmonitor\profile\SettingMenu.json"
+        # Initial Config
+        with open(file=self.setting_addr, encoding='utf-8') as cfg:
+            # getting config
+            self.dict_cfg = json.load(cfg)
         self.data_sender = [] 
         self.database_info = \
         {
@@ -60,7 +176,11 @@ class PSD_Monitoring(object):
             "DBname-alert_record":             self.display_clients()['database']['DBname-alert_record'],
             "DBname-alert_check":              self.display_clients()['database']['DBname-alert_check'],
             "DBname-alert_settled":            self.display_clients()['database']['DBname-alert_settled'],
-            "DBname-alert_time_consuming":     self.display_clients()['database']['DBname-alert_time_consuming']
+            "DBname-alert_time_consuming":     self.display_clients()['database']['DBname-alert_time_consuming'],
+            "DBname-collect_time":             self.display_clients()['database']['DBname-collect_time'],
+            "DBname-process_time":             self.display_clients()['database']['DBname-process_time'],
+            "DBname-write_time":               self.display_clients()['database']['DBname-write_time'],
+            "DBname-sep_table_time":           self.display_clients()['database']['DBname-sep_table_time']
         }
         self.station_client = {}
         self.server_client = {}
@@ -74,20 +194,31 @@ class PSD_Monitoring(object):
         self.collect_notes = None
         self.current_note = None
         self.lock_file = True
+        self.sep = False
+        self.dele = False
+        self.create_sep_thread = True
+        self.create_proc_thread = True
+        self.create_write_db_thread = True
         self.q = queue.Queue() 
         self.time_count_connect = []
         self.relay_buff = []
         self.relay_sort_ls = []
         self.alert_event = threading.Event()
+        self.sep_event = threading.Event()
         self.now_datetime = datetime.now()
         self.source_measurement = self.database_info['DBname-station_HISTORY']
-        # Initial Config
-        with open(file=self.setting_addr, encoding='utf-8') as cfg:
-            # getting config
-            dict_cfg = json.load(cfg)
-        self.Tc = dict_cfg['InitialConfig']['Tc']
-        self.base_time = dict_cfg['InitialConfig']['base_time']
-        self.save_all = dict_cfg['InitialConfig']['save_all']
+        self.alarm_object = Alarm()
+        self.monitor_object = PerformanceMonitoring()
+        self.Tc = self.dict_cfg['InitialConfig']['Tc']
+        self.base_time = self.dict_cfg['InitialConfig']['base_time']
+        self.save_all = self.dict_cfg['InitialConfig']['save_all']
+        self.station_info = self.dict_cfg['TerminalClient']['T1']['station']
+        self.debug_monitor = self.dict_cfg["InitialConfig"]["debug_monitor"]
+        
+        # FIFO队列缓冲区
+        self.write_cache_from_station = FIFO.FIFOBufffer(1000)
+        self.write_cache_from_station_SAVE = FIFO.FIFOBufffer(1000)
+        self.write_cache_from_station_HISTORY = FIFO.FIFOBufffer(1000)
 
 
     def ff(self, result, time):
@@ -95,7 +226,7 @@ class PSD_Monitoring(object):
         l = len(result)
         if l == 1:
            if   time == 'S':
-                return int("0x" + str(result[0:1]), base=16)
+                t = int("0x" + str(result[0:1]), base=16)
            if   time == 'Q':
                 return int("0x" + str(0), base=16)
         if l == 2:
@@ -138,53 +269,59 @@ class PSD_Monitoring(object):
 
 
     def display_clients(self):
-        with open(file=self.setting_addr, encoding='utf-8') as cfg:
-            # getting config
-            dict_cfg = json.load(cfg)
-            T_dict = {}
-            for i in range(dict_cfg['TerminalNum']):
-                T = "T" + str(i+1)
-                Th = dict_cfg['TerminalClient'][T]['host']
-                Tp = dict_cfg['TerminalClient'][T]['port']
-                T_dict[T] = {'host': Th, 'port': Tp}  
-            # 数据库
-            DBhost = dict_cfg['DatabaseClient']['host']
-            DBport = dict_cfg['DatabaseClient']['port']
-            DBusername = dict_cfg['DatabaseClient']['username']
-            DBpassword = dict_cfg['DatabaseClient']['password']
-            # 站点记录
-            DBname_station = dict_cfg['DatabaseClient']['DBname'][0]
-            DBname_station_SAVE = dict_cfg['DatabaseClient']['DBname'][1]
-            DBname_station_HISTORY = dict_cfg['DatabaseClient']['DBname'][2]
-            # 过车记录
-            DBname_train = dict_cfg['DatabaseClient']['DBname'][3]
-            # 网络记录
-            DBname_network = dict_cfg['DatabaseClient']['DBname'][4]
-            # 报警记录
-            DBname_alert_record = dict_cfg['DatabaseClient']['DBname'][5]
-            DBname_alert_check = dict_cfg['DatabaseClient']['DBname'][6]
-            DBname_alert_settled = dict_cfg['DatabaseClient']['DBname'][7]
-            DBname_alert_time_consuming = dict_cfg['DatabaseClient']['DBname'][8]
-            # 处理
-            dict_info = {
-                'terminal': 
-                    T_dict,
-                'database':{
-                    'host': DBhost,
-                    'port': DBport,
-                    'username': DBusername,
-                    'password': DBpassword,
-                    'DBname-station': DBname_station,
-                    'DBname-station_SAVE': DBname_station_SAVE,
-                    'DBname-station_HISTORY': DBname_station_HISTORY,
-                    'DBname-train': DBname_train,
-                    'DBname-network': DBname_network,
-                    'DBname-alert_record': DBname_alert_record,
-                    'DBname-alert_check': DBname_alert_check,
-                    'DBname-alert_settled': DBname_alert_settled,
-                    'DBname-alert_time_consuming': DBname_alert_time_consuming
-                }
+        T_dict = {}
+        for i in range(self.dict_cfg['TerminalNum']):
+            T = "T" + str(i+1)
+            Th = self.dict_cfg['TerminalClient'][T]['host']
+            Tp = self.dict_cfg['TerminalClient'][T]['port']
+            T_dict[T] = {'host': Th, 'port': Tp}  
+        # 数据库
+        DBhost = self.dict_cfg['DatabaseClient']['host']
+        DBport = self.dict_cfg['DatabaseClient']['port']
+        DBusername = self.dict_cfg['DatabaseClient']['username']
+        DBpassword = self.dict_cfg['DatabaseClient']['password']
+        # 站点记录
+        DBname_station = self.dict_cfg['DatabaseClient']['DBname'][0]
+        DBname_station_SAVE = self.dict_cfg['DatabaseClient']['DBname'][1]
+        DBname_station_HISTORY = self.dict_cfg['DatabaseClient']['DBname'][2]
+        # 过车记录
+        DBname_train = self.dict_cfg['DatabaseClient']['DBname'][3]
+        # 网络记录
+        DBname_network = self.dict_cfg['DatabaseClient']['DBname'][4]
+        # 报警记录
+        DBname_alert_record = self.dict_cfg['DatabaseClient']['DBname'][5]
+        DBname_alert_check = self.dict_cfg['DatabaseClient']['DBname'][6]
+        DBname_alert_settled = self.dict_cfg['DatabaseClient']['DBname'][7]
+        DBname_alert_time_consuming = self.dict_cfg['DatabaseClient']['DBname'][8]
+        # 采集与处理时间
+        DBname_collect_time = self.dict_cfg['DatabaseClient']['DBname'][9]
+        DBname_process_time = self.dict_cfg['DatabaseClient']['DBname'][10]
+        DBname_write_time = self.dict_cfg['DatabaseClient']['DBname'][11]
+        DBname_sep_table_time = self.dict_cfg['DatabaseClient']['DBname'][12]
+        # 处理集合
+        dict_info = {
+            'terminal': 
+                T_dict,
+            'database':{
+                'host': DBhost,
+                'port': DBport,
+                'username': DBusername,
+                'password': DBpassword,
+                'DBname-station': DBname_station,
+                'DBname-station_SAVE': DBname_station_SAVE,
+                'DBname-station_HISTORY': DBname_station_HISTORY,
+                'DBname-train': DBname_train,
+                'DBname-network': DBname_network,
+                'DBname-alert_record': DBname_alert_record,
+                'DBname-alert_check': DBname_alert_check,
+                'DBname-alert_settled': DBname_alert_settled,
+                'DBname-alert_time_consuming': DBname_alert_time_consuming,
+                'DBname-collect_time': DBname_collect_time,
+                'DBname-process_time': DBname_process_time,
+                'DBname-write_time': DBname_write_time,
+                "DBname-sep_table_time": DBname_sep_table_time
             }
+        }
         return dict_info
     
 
@@ -225,12 +362,63 @@ class PSD_Monitoring(object):
       
                                     
     def DataBase_connect(self, HOST, PORT, USER, PASSWORD, save_all):
+        # connect to database 
         try:
-            # connect to database 
+            # station 
             self.DBclient = InfluxDBClient(HOST, PORT, USER, PASSWORD)
+            station = self.database_info['DBname-station']
+            self.DBclient.switch_database(station)
+            query_retention = f'CREATE RETENTION POLICY "station_retention" ON "{station}" DURATION 1h REPLICATION 1 DEFAULT'
+            self.DBclient.query(query_retention) 
+            # station history
+            self.DBclient = InfluxDBClient(HOST, PORT, USER, PASSWORD)
+            station = self.database_info['DBname-station_HISTORY']
+            self.DBclient.switch_database(station)
+            query_retention = f'CREATE RETENTION POLICY "station_HISTORY_retention" ON "{station}" DURATION 3d REPLICATION 1 DEFAULT'
+            self.DBclient.query(query_retention) 
+            # alert record
+            self.DBclient_alarm = InfluxDBClient(HOST, PORT, USER, PASSWORD)
+            station = self.database_info["DBname-alert_record"]
+            self.DBclient_alarm.switch_database(station)
+            query_retention = f'CREATE RETENTION POLICY "alert_record_retention" ON "{station}" DURATION 1h REPLICATION 1 DEFAULT'
+            self.DBclient_alarm.query(query_retention) 
+            # alert settle
+            self.DBclient_alert_settle = InfluxDBClient(HOST, PORT, USER, PASSWORD)
+            station = self.database_info["DBname-alert_settled"]
+            self.DBclient_alert_settle.switch_database(station)
+            query_retention = f'CREATE RETENTION POLICY "alert_settled_retention" ON "{station}" DURATION 1h REPLICATION 1 DEFAULT'
+            self.DBclient_alert_settle.query(query_retention) 
+
+            # 用于监控设备状态
+            if self.debug_monitor:
+                # collect time
+                self.DBclient_collect_time = InfluxDBClient(HOST, PORT, USER, PASSWORD)
+                station = self.database_info["DBname-collect_time"]
+                self.DBclient_collect_time.switch_database(station)
+                query_retention = f'CREATE RETENTION POLICY "collect_time_retention" ON "{station}" DURATION 1h REPLICATION 1 DEFAULT'
+                self.DBclient_collect_time.query(query_retention) 
+                # data process time
+                self.DBclient_data_process_time = InfluxDBClient(HOST, PORT, USER, PASSWORD)
+                station = self.database_info["DBname-process_time"]
+                self.DBclient_data_process_time.switch_database(station)
+                query_retention = f'CREATE RETENTION POLICY "process_time_retention" ON "{station}" DURATION 1h REPLICATION 1 DEFAULT'
+                self.DBclient_data_process_time.query(query_retention)
+                # sep table time
+                self.DBclient_sep_table_time = InfluxDBClient(HOST, PORT, USER, PASSWORD)
+                station = self.database_info["DBname-sep_table_time"]
+                self.DBclient_sep_table_time.switch_database(station)
+                query_retention = f'CREATE RETENTION POLICY "sep_table_time_retention" ON "{station}" DURATION 1h REPLICATION 1 DEFAULT'
+                self.DBclient_sep_table_time.query(query_retention)
+                # write db time
+                self.DBclient_write_db_time = InfluxDBClient(HOST, PORT, USER, PASSWORD)
+                station = self.database_info["DBname-write_time"]
+                self.DBclient_write_db_time.switch_database(station)
+                query_retention = f'CREATE RETENTION POLICY "write_time_retention" ON "{station}" DURATION 1h REPLICATION 1 DEFAULT'
+                self.DBclient_write_db_time.query(query_retention)
+
+             
             # clearing database and then creating a new database again
             if save_all == False:
-                
                 self.DBclient.drop_database(self.database_info['DBname-station'])   
                 self.DBclient.create_database(self.database_info['DBname-station'])
                 
@@ -249,21 +437,30 @@ class PSD_Monitoring(object):
                 self.DBclient.drop_database(self.database_info['DBname-network'])   
                 self.DBclient.create_database(self.database_info['DBname-network'])
                 
-                self.DBclient.drop_database(self.database_info['DBname-alert_record'])
-                self.DBclient.create_database(self.database_info['DBname-alert_record'])
+                self.DBclient_alarm.drop_database(self.database_info['DBname-alert_record'])
+                self.DBclient_alarm.create_database(self.database_info['DBname-alert_record'])
                 
                 self.DBclient.drop_database(self.database_info['DBname-alert_check'])
                 self.DBclient.create_database(self.database_info['DBname-alert_check'])
                 
-                self.DBclient.drop_database(self.database_info['DBname-alert_settled'])
-                self.DBclient.create_database(self.database_info['DBname-alert_settled'])
+                self.DBclient_alert_settle.drop_database(self.database_info['DBname-alert_settled'])
+                self.DBclient_alert_settle.create_database(self.database_info['DBname-alert_settled'])
                 
                 self.DBclient.drop_database(self.database_info['DBname-alert_time_consuming'])
                 self.DBclient.create_database(self.database_info['DBname-alert_time_consuming'])
+
+                self.DBclient_collect_time.drop_database(self.database_info['DBname-collect_time'])
+                self.DBclient_collect_time.create_database(self.database_info['DBname-collect_time'])
+
+                self.DBclient_data_process_time.drop_database(self.database_info['DBname-process_time'])
+                self.DBclient_data_process_time.create_database(self.database_info['DBname-process_time'])
+
+                self.DBclient.drop_database(self.database_info['DBname-write_time'])
+                self.DBclient.create_database(self.database_info['DBname-write_time'])
                 
             print('database connected')    
-        except:
-            print('database connect fail')           
+        except Exception as e:
+            print('database connect fail:' + str(e))           
    
         
     ##################################################################################################################     
@@ -312,81 +509,8 @@ class PSD_Monitoring(object):
         ]
         self.DBclient.write_points(network_data)
         
-     ##################################################################################################################   
-        
-    def DataBase_alert_record_send(self, DBname, records, _station_, _line_, current_time):
-        self.DBclient.switch_database(DBname)
-        alert_record_data = \
-        [
-            {
-                "measurement":           DBname,
-                "time":                  current_time,
-                "fields":           
-                {
-
-                    "报警内容":           records,
-                    "报警响应时间":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                },
-                "tags":
-                {
-                    "行车方向":          _line_,
-                    "站点":              _station_
-                }    
-            }
-        ]
-        self.DBclient.write_points(alert_record_data)
-        
-    def DataBase_alert_check_send(self, DBname, current_time):
-        self.DBclient.switch_database(DBname)
-        alert_check_data = \
-        [
-            {
-                "measurement":          DBname,
-                "time":                 current_time,
-                "fields":
-                {
-                    "发现时间":          datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                }
-            }
-        ]
-        self.DBclient.write_points(alert_check_data)
-        
-    def DataBase_alert_settled_send(self, DBname, records, _station_, _line_, current_time):
-        self.DBclient.switch_database(DBname)
-        alert_settled_data = \
-        [
-            {
-                "measurement":          DBname,
-                "time":                 current_time,
-                "fields":
-                {
-                    "恢复内容":              records,
-                    "报警解除时间":          datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
-                },
-                "tags":
-                {
-                    "行车方向":          _line_,
-                    "站点":              _station_
-                }   
-            }
-        ]
-        self.DBclient.write_points(alert_settled_data)
-        
-    def DataBase_alert_time_consuming_send(self, DBname, time_consuming, current_time):
-        self.DBclient.switch_database(DBname)
-        alert_time_consuming = \
-        [
-            {
-                "measurement":                  DBname,
-                "time":                         current_time,
-                "fields":
-                {
-                    "总耗时":                    time_consuming
-                }
-            }
-        ]
-        self.DBclient.write_points(alert_time_consuming)
-
+ 
+    ##################################################################################################################
 
     def kill_service_by_name(self, service_name):
     # 遍历所有的进程
@@ -401,15 +525,549 @@ class PSD_Monitoring(object):
 
     def Modbustcp_close(self):
         self.TCPclient.close()
+
+
+    def separation_table(self):
+        # 备份历史记录数据库,分离出一个新表
+        self.sep_event.wait()
+        if self.sep_event.is_set():
+            now = datetime.now()
+            min = 0
+            #create a influxdb client
+            sep_client = InfluxDBClient(self.database_info['host'], self.database_info['port'], self.database_info['username'], self.database_info['password'])
+            yesterday = (now - timedelta(1)).strftime('%Y-%m-%d')
+            day_before_yesterday = (datetime.now() - timedelta(2)).strftime('%Y-%m-%d')
+            yesterday_utc = (now - timedelta(1)).strftime('%Y-%m-%dT16:00:00Z')
+            self.source_measurement = self.database_info['DBname-station_HISTORY']
+            new_measurement = self.source_measurement + "_" + now.strftime('%Y%m%d')
+            new_measurement = new_measurement.replace(now.strftime('%Y%m%d'), yesterday.replace('-', '')) 
+            # self.new_HISTORY_set["measurement"] = new_measurement
+            # self.new_HISTORY_set["tags"] = {"line": self.line, "Channel": self.channel, "StationName": self.station}
+            # self.new_HISTORY_set["time"] = self.alarm_time_UTC
+            # self.new_HISTORY_set["fields"] = self.door_HISTORY_set
+            # new_history_data = [self.new_HISTORY_set]
+            #self.DBclient.switch_database(self.source_measurement)
+            sep_client.switch_database(self.source_measurement)
+            while True: 
+                start_time = datetime.now() 
+                if(self.sep == True):
+                    # 结束线程 
+                    sep_client.close()
+                    self.sep_event.clear()     
+                    self.create_sep_thread = True
+                    break
+                try:
+                    # yesterday_utc = (datetime.now(pytz.utc) - timedelta(1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+                    # day_before_yesterday = (datetime.now() - timedelta(2)).strftime('%Y-%m-%d')
+                    # day_day_before_yesterday = (datetime.now() - timedelta(3)).strftime('%Y-%m-%d')
+                    # day_before_yesterday_utc = (datetime.now(pytz.utc) - timedelta(2)).strftime('%Y-%m-%dT%H:%M:%SZ')
+                    # Two_days_later = (self.now_datetime + timedelta(2)).strftime('%Y-%m-%d')
+                    pass_one_day = parser.parse("{}T16:00:00Z".format(day_before_yesterday))
+                    days_from = pass_one_day + timedelta(minutes=(min))
+                    days_to = pass_one_day + timedelta(minutes=(min+1))
+                    days_from = days_from.strftime('%Y-%m-%dT%H:%M:%SZ')
+                    days_to = days_to.strftime('%Y-%m-%dT%H:%M:%SZ')
+                    #############################################################################################################
+  
+                    #开始是UTC时间 16：00：00 t 从 0 开始
+                    query_separate = f"SELECT * FROM {self.source_measurement} WHERE time > '{days_from}' and time <= '{days_to}'"
+                    print(query_separate)
+                    result = sep_client.query(query_separate)
+                    acc = 0
+                    queryagain = 0
+                    points = []
+                    while True:
+                        if(len(result) > 0):
+                            points = list(result.get_points())   
+                            break
+                        elif(queryagain > 0):
+                            break
+                        time.sleep(0.2)
+                        acc += 1
+                        if(acc > 20):
+                            query_separate = f"SELECT * FROM {self.source_measurement} WHERE time > '{days_from}' and time <= '{days_to}'"
+                            print(query_separate)
+                            result = sep_client.query(query_separate)
+                            acc = 0
+                            time.sleep(1)
+                            queryagain = 1                                      
+                    # 获取新point
+                    new_points = []  
+                    i = 0
+                    for point in points: 
+                        fields = {}
+                        for relay in self.relay_values:
+                            fields[relay] = point[relay]
+                        fields['alert'] = point['alert']
+                        # 假设 point 是一个字典，包含了 time, tags, 和 fields  
+                        new_point = {  
+                            "measurement": new_measurement,  
+                            "tags": {"line": point['line'], "Channel": point['Channel'], "StationName": point['StationName']},
+                            "fields": fields,
+                            "time": point['time']
+                        }
+                        self.new_measurement = new_measurement
+                        new_points.append(new_point) 
+                        i+=1
+                    if new_points:
+                        sep_client.write_points(new_points)
+                    min += 1
+                    if min >= 24*60: 
+                        # 分完但未清表 
+                        self.sep = True      
+                        self.dele = False 
+                        break
+                except Exception as e:
+                    self.sep = False
+                    self.dele = True
+                    print('run to write points exception:' + str(e))
+                    traceback.print_exc()
+
+                end_time = datetime.now() 
+                sep_time = end_time - start_time
+                milliseconds_sep_time = sep_time.total_seconds() * 1000
+                if self.debug_monitor:
+                    self.monitor_object.DataBase_sep_table_time_send(milliseconds_sep_time, self.alarm_time_UTC)
+         
+    ##################################################################################################################             
+
+    def data_process(self):
+        # 进行数据处理
+        start_time = datetime.now()  
+        alarm_time_UTC  = datetime.utcnow()
+
+        now = datetime.now()   
+        current_minute = now.minute
+        terminal_time = now.strftime("%H:%M:%S")
+        # terminal_date = now.strftime('%Y-%m-%d %H:%M:%S')
+        local_time = time.localtime(time.time())  
+        export_time = self.dict_cfg['InitialConfig']['export_time'] 
+        export_db_start_time = self.dict_cfg['InitialConfig']['export_db_start_time']    
+        export_db_end_time = self.dict_cfg['InitialConfig']['export_db_end_time']  
+        delete_db_start_time = self.dict_cfg['InitialConfig']['delete_db_start_time']
+        delete_db_end_time = self.dict_cfg['InitialConfig']['delete_db_end_time']
+        end_time = time.time()
+        # separate_time = "00:00:00"
+        exp_time = datetime.strptime(export_db_start_time, "%H:%M:%S")  
+        one_minute = timedelta(minutes=1)  
+        create_sep_time = exp_time - one_minute  
+        create_sep_time = create_sep_time.strftime("%H:%M:%S") 
+        self.debug_monitor = self.dict_cfg["InitialConfig"]["debug_monitor"]
+
+        # create_sep_time <= terminal_time < "23:59:59"
+        if (create_sep_time <= terminal_time < export_db_start_time) and (self.create_sep_thread == True):
+            # 创建分表thread并启动
+            sep = threading.Thread(target=self.separation_table)
+            sep.start()
+            self.create_sep_thread = False
+
+        
+        self.LINE = {"上行": 'S', "下行": 'X'}
+        station_info = self.dict_cfg['TerminalClient']['T1']['station']
+        StationNames = list(station_info.keys())
+        for station in StationNames:
+            lines = list(station_info[station].keys())
+            for line in lines:
+                door_set, base_set = {}, {}
+                door_SAVE_set, base_SAVE_set = {}, {}
+                self.door_HISTORY_set, base_HISTORY_set = {}, {}
+                new_door_HISTORY_set, new_HISTORY_set = {}, {}
+                RELAY, CHANNEL, CLASS = station_info[station][line]['relay'], station_info[station][line]['channel'], station_info[station][line]['class']
+                NAME = station_info[station][line]['name']
+                self.name = NAME
+                self.relay = RELAY
+                line_bool = self.LINE[line]
+                # 获取动作逻辑配置
+                LOGIC = station_info[station][line]['ActionLogic']
+                logic_num = len(LOGIC)
+                # 获取继电器端口采集数据
+                relay_keys = list(RELAY.keys())
+                self.relay_values = list(RELAY.values())
+                channel = CHANNEL
+                channel_values = list(channel.values())
+                ch_ls = ['CH' + str(ch) for ch, group in groupby(sorted(channel_values))]
+                ch_num = [str(ch) for ch, group in groupby(sorted(channel_values))]
+                channel = ' '.join(ch_ls) 
+                ch_num = ''.join(ch_num)
+                ch_num = int(ch_num)
+                for ch in channel_values:
+                    collect = self.data_connect(self.data_item, RELAY, 'CH' + str(ch))
+                    collect = [int(item) for item in collect]
+                    for i in self.relay_values:
+                        matching_key = next(k for k, v in RELAY.items() if v == i)
+                        door_set[i] = collect[int(self.relay_values.index(i))]
+                        self.door_HISTORY_set[i] = collect[int(self.relay_values.index(i))]
+                        new_door_HISTORY_set[i] = collect[int(self.relay_values.index(i))]
+                        door_SAVE_set[i] = collect[int(self.relay_values.index(i))]  
+                        
+                # 排序处理
+                collect_ = {str(num1).zfill(2): num2 for num1, num2 in zip(relay_keys, collect)}
+                collect_sorted = sorted(collect_.keys())
+                collect_sorted_values = [collect_[key] for key in collect_sorted]
+
+                # 判断继电器序列中所有机电电源端口和信号电源端口
+                relay =  OrderedDict(sorted(RELAY.items()))
+                relay_ls = list(relay.values())
+                port_class = OrderedDict(sorted(CLASS.items()))
+                port_class = {value: list(key for key, val in port_class.items() if val == value) for value in port_class.values()}
+                EM_power, S_power = [], []
+                for key in port_class: 
+                    if key == 2:
+                        for i in port_class[2]:
+                            EM_power.append(relay[str(i)])
+                    if key == 3:
+                        for j in port_class[3]:
+                            S_power.append(relay[str(j)])         
+                EM_power_ls, S_power_ls = [], []
+                collect_ls = collect_sorted_values
+                for i in EM_power:
+                    EM_power = int(collect_sorted_values[relay_ls.index(i)])
+                    EM_power_ls.append(EM_power)
+                for j in S_power:       
+                    S_power = int(collect_sorted_values[relay_ls.index(j)])
+                    S_power_ls.append(S_power)
+                                
+                # 进去逻辑判断报警 
+                if ((EM_power_ls != []) or (S_power_ls != [])) and ((0 in EM_power_ls) or (0 in S_power_ls)):
+                    alert = ["异常", "Warning"]
+                    alert_mark = 0
+                    door_set["AlertMark"] = alert_mark
+                    door_SAVE_set["AlertMark"] = alert_mark
+                    door_set["alert"] = alert[0] 
+                    self.door_HISTORY_set["alert"] = alert[0]
+                    new_door_HISTORY_set["alert"] = alert[0]
+                    self.alert_event.set()
+                
+                                        
+                    # 判断机电电源和信号电源是否异常
+                    if (0 in EM_power_ls):
+                        state = ["机电电源异常", "EM Power Warning"]
+                        door_set["Note"] = state[0]
+                        door_SAVE_set["Note"] = state[1]
+                        self.door_nop.append(door_set['Note'])
+                        if self.EM_alert_flag:
+                            self.normal_flag = True
+                            self.warning_flag = True
+                            self.undefine = True
+                            self.CanNotJudge = True
+                            self.EM_alert_flag = False
+                            self.S_alert_flag = True
+                            self.EM_S_alert_flag = True
+                            self.alarm_record = state[0]
+                            self.alarm_object.alert_n(self.alarm_record, station, line, self.alarm_time_UTC)
+                               
+                    if (0 in S_power_ls):
+                        state = ["信号电源异常", "Signal Power Warning"]
+                        door_set["Note"] = state[0]  
+                        door_SAVE_set["Note"] = state[1]
+                        self.door_nop.append(door_set['Note']) 
+                        if self.S_alert_flag:
+                            self.normal_flag = True
+                            self.warning_flag = True
+                            self.undefine = True
+                            self.CanNotJudge = True
+                            self.EM_alert_flag = True
+                            self.S_alert_flag = False
+                            self.EM_S_alert_flag = True
+                            self.alarm_record = state[0]
+                            self.alarm_object.alert_n(self.alarm_record, station, line, self.alarm_time_UTC)
+                                    
+                    if (0 in EM_power_ls) and (0 in S_power_ls):
+                        state = ["机电/信号电源异常", "EM/Signal Power Warning"]
+                        door_set["Note"] = state[0]     
+                        door_SAVE_set["Note"] = state[1]
+                        self.door_nop.append(door_set['Note'])
+                        if self.EM_S_alert_flag:
+                            self.normal_flag = True
+                            self.warning_flag = True
+                            self.undefine = True
+                            self.CanNotJudge = True
+                            self.EM_alert_flag = True
+                            self.S_alert_flag = True
+                            self.EM_S_alert_flag = False
+                            self.alarm_record = state[0]
+                            self.alarm_object.alert_n(self.alarm_record, station, line, self.alarm_time_UTC)
+                                
+                elif (logic_num != 0):
+                    for lgc in range(logic_num):
+                        # 解析配置文件
+                        SEQUENCE, STATE, LABEL = LOGIC[str(lgc)]["sequence"], LOGIC[str(lgc)]["state"], LOGIC[str(lgc)]["label"]
+                        sequence = OrderedDict(sorted(SEQUENCE.items()))
+                        sequence_ls = list(sequence.values())
+                        # 判断动作状态
+                        if len(sequence_ls) == len(collect_ls) and (all(sequence_ls == collect_ls for sequence_ls, collect_ls in zip(sequence_ls, collect_ls)) and (LABEL == 1)):
+                            door_set["Note"] = STATE
+                            self.door_nop.append(door_set['Note'])
+                            alert = ["正常", 'Normal']
+                            alert_mark = LABEL 
+                            door_set["AlertMark"] = alert_mark
+                            door_SAVE_set["AlertMark"] = alert_mark
+                            door_SAVE_set["Note"] = 'normal'
+                            self.alarm_object.alert_m(self.alert, self.station, self.line, self.alarm_time_UTC)
+
+                        if len(sequence_ls) == len(collect_ls) and (all(sequence_ls == collect_ls for sequence_ls, collect_ls in zip(sequence_ls, collect_ls)) and (LABEL == 0)):
+                            door_set["Note"] = STATE
+                            self.door_nop.append(door_set['Note'])
+                            alert = ["异常", "Warning"]
+                            alert_mark = LABEL
+                            door_set["AlertMark"] = alert_mark
+                            door_SAVE_set["AlertMark"] = alert_mark
+                            door_SAVE_set["Note"] = 'warning'
+                            self.alert_event.set()
+                                                               
+                        if len(sequence_ls) == len(collect_ls) and (all(sequence_ls != collect_ls for sequence_ls, collect_ls in zip(sequence_ls, collect_ls))):
+                            state = ["无法判断", "Unable"]
+                            door_set["Note"] = state[0]
+                            door_SAVE_set["Note"] = state[1]
+                            self.door_nop.append(door_set['Note'])
+                            alert = ["异常", "Warning"]
+                            alert_mark = -1
+                            door_set["AlertMark"] = alert_mark
+                            door_SAVE_set["AlertMark"] = alert_mark
+                            door_set["alert"] = alert[0] 
+                            self.door_HISTORY_set["alert"] = alert[0]
+                            new_door_HISTORY_set["alert"] = alert[0]
+                            self.alert_event.set()
+                            self.alert = alert[0]
+                            self.station = station
+                            self.line = line
+                            self.alert_event.set()
+
+                elif logic_num == 0:
+                    state = ["正常", 'Normal']
+                    door_set["Note"] = state[0]
+                    door_SAVE_set["Note"] = state[1]
+                    alert = ["正常", 'Normal']
+                    alert_mark = 1
+                    door_set["AlertMark"] = alert_mark
+                    door_SAVE_set["AlertMark"] = alert_mark
+                    door_set["alert"] = alert[0] 
+                    self.door_HISTORY_set["alert"] = alert[0]
+                    new_door_HISTORY_set["alert"] = alert[0]
+                    self.window_show_flag = True
+                    if self.undefine:
+                        self.normal_flag = True
+                        self.warning_flag = True
+                        self.undefine = True
+                        self.CanNotJudge = True
+                        self.EM_alert_flag = True
+                        self.S_alert_flag = True
+                        self.EM_S_alert_flag = True
+                        self.alarm_object.alert_m(self.alert, self.station, self.line, self.alarm_time_UTC)
+        
+                # 整理成统一形式                                                    
+                door_set["deviceIP"] = self.Device_IP  
+                base_set["measurement"] = self.database_info['DBname-station']                
+                base_set["tags"] = {"line": line, "Channel": channel, "StationName": station}            
+                base_set["time"] = alarm_time_UTC
+                base_set["fields"] = door_set
+                                                        
+                door_SAVE_set["StationName"] = ''.join([word[0] for word in pinyin(station, style=Style.NORMAL)])
+                base_SAVE_set["measurement"] = self.database_info['DBname-station_SAVE']
+                base_SAVE_set["tags"] = {"line": line_bool, "Channel": channel}
+                base_SAVE_set["time"] = alarm_time_UTC
+                base_SAVE_set["fields"] = door_SAVE_set
+                            
+                base_HISTORY_set["measurement"] = self.source_measurement
+                base_HISTORY_set["tags"] = {"line": line, "Channel": channel, "StationName": station}
+                base_HISTORY_set["time"] = alarm_time_UTC
+                base_HISTORY_set["fields"] = self.door_HISTORY_set
+                                
+                # Getting effective data to database
+                monitor_data = base_set
+                save_data = base_SAVE_set
+                history_data = base_HISTORY_set
+                #print(monitor_data)
+
+                self.new_HISTORY_set = new_HISTORY_set
+                self.alarm_time_UTC = alarm_time_UTC
+                self.line = line
+                self.channel = channel
+                self.station = station
+                self.alert = alert[0]
+
+                ##################################################################################
+
+                # 需要写入数据库的数据 
+                self.write_cache_from_station.push(monitor_data)
+                # self.write_cache_from_station_SAVE.push(save_data)
+                self.write_cache_from_station_HISTORY.push(history_data) 
+
+        # if current_minute == 0:
+        #       # connect to database 
+        #     station = self.database_info['DBname-station']
+        #     self.DBclient.switch_database(station)
+        #     query_retention = f'DROP RETENTION POLICY "station_retention" ON "{station}"'
+        #     self.DBclient.query(query_retention) 
+        #     query_retention = f'CREATE RETENTION POLICY "station_retention" ON "{station}" DURATION 1h REPLICATION 1 DEFAULT'
+        #     self.DBclient.query(query_retention) 
+        #     self.DBclient.switch_database(station)
+        #     # alert record"
+        #     station = self.database_info["DBname-alert_record"]
+        #     self.DBclient_alarm.switch_database(station)
+        #     query_retention = f'DROP RETENTION POLICY "alert_record_retention" ON "{station}"'
+        #     self.DBclient_alarm.query(query_retention) 
+        #     query_retention = f'CREATE RETENTION POLICY "alert_record_retention" ON "{station}" DURATION 1h REPLICATION 1 DEFAULT'
+        #     self.DBclient_alarm.query(query_retention) 
+        #     self.DBclient_alarm.switch_database(station)
+        #     # alert settle
+        #     station = self.database_info["DBname-alert_settled"]
+        #     self.DBclient_alert_settle.switch_database(station)
+        #     query_retention = f'DROP RETENTION POLICY "alert_settled_retention" ON "{station}"'
+        #     self.DBclient_alert_settle.query(query_retention) 
+        #     query_retention = f'CREATE RETENTION POLICY "alert_settled_retention" ON "{station}" DURATION 1h REPLICATION 1 DEFAULT'
+        #     self.DBclient_alert_settle.query(query_retention) 
+        #     self.DBclient_alert_settle.switch_database(station)
+        #     # collect time
+        #     station = self.database_info["DBname-collect_time"]
+        #     self.DBclient_collect_time.switch_database(station)
+        #     query_retention = f'DROP RETENTION POLICY "collect_time_retention" ON "{station}"'
+        #     self.DBclient_collect_time.query(query_retention) 
+        #     query_retention = f'CREATE RETENTION POLICY "collect_time_retention" ON "{station}" DURATION 1h REPLICATION 1 DEFAULT'
+        #     self.DBclient_collect_time.query(query_retention)
+        #     self.DBclient_collect_time.switch_database(station)
+        #     # data process
+        #     station = self.database_info["DBname-process_time"]
+        #     self.DBclient_data_process_time.switch_database(station)
+        #     query_retention = f'DROP RETENTION POLICY "process_time_retention" ON "{station}"'
+        #     self.DBclient_data_process_time.query(query_retention) 
+        #     query_retention = f'CREATE RETENTION POLICY "process_time_retention" ON "{station}" DURATION 1h REPLICATION 1 DEFAULT'
+        #     self.DBclient_data_process_time.query(query_retention)
+        #     self.DBclient_data_process_time.switch_database(station)
+    
+        if (export_db_start_time < terminal_time <= export_db_end_time) and (self.sep == False):        # 到时间且未进行分表 
+            self.new_HISTORY_set = new_HISTORY_set
+            self.alarm_time_UTC = alarm_time_UTC
+            self.line = line
+            self.channel = channel
+            self.station = station
+            self.alert = alert[0]
+            self.sep_event.set()
+        else:
+            if self.debug_monitor:
+                self.monitor_object.DataBase_sep_table_time_send(0, alarm_time_UTC)
+     
+        if (delete_db_start_time < terminal_time <= delete_db_end_time) and (self.dele == False):     # 到时间且未进行清表则执行
+            yesterday = (datetime.now() - timedelta(1)).strftime('%Y-%m-%d')
+            day_before_yesterday_utc = (datetime.now(pytz.utc) - timedelta(2)).strftime('%Y-%m-%dT%H:%M:%SZ')
+            try:
+                # 清除前天表历史记录中数据
+                # query_delete = f"DELETE FROM {self.source_measurement} WHERE time > '{day_before_yesterday_utc}' - 1d"
+                # self.DBclient.query(query_delete) 
+                # 进入当天，已进行清表，重新置分表flag，等待下次到时间进入
+                self.dele = True  
+                self.sep = False
+            except:
+                self.dele = False
+                self.sep = False
+
+        end_time = datetime.now()  
+        # process_time = end_time - start_time
+        #milliseconds_process_time = process_time.total_seconds() * 1000
+        #self.DataBase_process_time_send("process_time", milliseconds_process_time, alarm_time_UTC)
+
+        process_time = end_time - start_time
+        milliseconds_process_time = process_time.total_seconds() * 1000
+        if self.debug_monitor:
+            self.monitor_object.DataBase_process_time_send(milliseconds_process_time, alarm_time_UTC)
            
-    ##################################################################################################################   
+    
+    def write_databases(self):
+        while True:
+            alarm_time_UTC  = datetime.utcnow()
+            start_time = datetime.now() 
+
+            # 送入“station”数据库
+            if self.write_cache_from_station.is_empty() == False:
+                self.write_cache_to_database(self.write_cache_from_station.pop(100), 'DBname-station') 
+            if self.write_cache_from_station_HISTORY.is_empty() == False:  
+                self.write_cache_to_database(self.write_cache_from_station_HISTORY.pop(100), 'DBname-station_HISTORY')
+            # self.write_cache_to_database(self.write_cache_from_station_SAVE, 'DBname-station_SAVE') 
+
+            if self.alarm_object.write_cache_from_alert_note.is_empty() == False:
+                self.write_cache_to_alarm_database(self.alarm_object.write_cache_from_alert_note.pop(100))
+            if self.alarm_object.write_cache_from_alert_settled.is_empty() == False:
+                self.write_cache_to_alert_settle_database(self.alarm_object.write_cache_from_alert_settled.pop(100))
+            
+            if self.debug_monitor:
+                if (self.monitor_object.write_cache_from_collect_data.is_empty() == False):
+                    self.write_cache_to_collect_time_database(self.monitor_object.write_cache_from_collect_data.pop(100))
+                if (self.monitor_object.write_cache_from_process_data.is_empty() == False):
+                    self.write_cache_to_process_time_database(self.monitor_object.write_cache_from_process_data.pop(100))
+                if (self.monitor_object.write_cache_from_sep_table_data.is_empty() == False):
+                    self.write_cache_to_sep_table_time_database(self.monitor_object.write_cache_from_sep_table_data.pop(100))
+                    #shiji zhege danci shi cache bushi cache
+
+            end_time = datetime.now()  
+            write_time = end_time - start_time
+
+            if write_time.total_seconds() < 1:
+                sleepT = 1 - write_time.total_seconds()
+                time.sleep(sleepT)
+
+            if self.debug_monitor:
+                end_time = datetime.now()  
+                write_time = end_time - start_time
+                milliseconds_write_time = write_time.total_seconds() * 1000
+                self.monitor_object.DataBase_write_time_send(milliseconds_write_time, alarm_time_UTC)
+                if (self.monitor_object.write_cache_from_write_db_data.is_empty() == False):
+                    self.write_cache_to_write_db_time_database(self.monitor_object.write_cache_from_write_db_data.pop(100))
+            
+
+    def write_cache_to_database(self, cache, db_name):
+        self.DBclient.switch_database(self.database_info[db_name])
+        #for point in cache:
+        try:
+            self.DBclient.write_points(cache)
+        except Exception as e:
+            print("写入失败:" + str(self.database_info[db_name]) )
+
+    def write_cache_to_alarm_database(self, cache):
+        try:
+            self.DBclient_alarm.write_points(cache)
+        except Exception as e:
+            print("写入失败:" + str(self.database_info["DBname-alert_record"]) )
+
+    def write_cache_to_alert_settle_database(self, cache):
+        try:
+            self.DBclient_alert_settle.write_points(cache)
+        except Exception as e:
+            print("写入失败:" + str(self.database_info["DBname-alert_settled"]) )
+
+    def write_cache_to_collect_time_database(self, cache):
+        try:
+            self.DBclient_collect_time.write_points(cache)
+        except Exception as e:
+            print("写入失败:" + str(self.database_info["DBname-collect_time"]) )
+    
+    def write_cache_to_process_time_database(self, cache):
+        try:
+            self.DBclient_data_process_time.write_points(cache)
+        except Exception as e:
+            print("写入失败:" + str(self.database_info["DBname-process_time"]) )
+
+    def write_cache_to_sep_table_time_database(self, cache):
+        try:
+            self.DBclient_data_process_time.write_points(cache)
+        except Exception as e:
+            print("写入失败:" + str(self.database_info["DBname-sep_table_time"]) )
+
+    def write_cache_to_write_db_time_database(self, cache):
+        try:
+            self.DBclient_write_db_time.write_points(cache)
+        except Exception as e:
+            print("写入失败:" + str(self.database_info["DBname-write_time"]) )
+
+    ################################################################################################################## 
     
     def main(self, clients, cycle, continous, network_connect_flag, base_time):
         Device_IP, Device_Port = clients[1], clients[2]
         IP_num = int(Device_IP.split('.')[-1])
 
         # IP地址和端口号
-        fix_source_address = ('0.0.0.0', 8888)
+        self.Device_IP = Device_IP
+        # 创建Modbus TCP客户端
+        fix_source_address = (Device_IP, 8888)
         # 创建Modbus TCP客户端
         self.TCPclient = ModbusTcpClient(Device_IP, Device_Port)
         # # 获取底层的socket对象
@@ -468,13 +1126,13 @@ class PSD_Monitoring(object):
         self.EM_S_alert_flag = True
         self.door_alert_flag = True
         self.alarm_record = ""
-        
-  
+
         try:
             while True:  
                 try:
-                    start_time = time.time()
+                    start_time = datetime.now()  
                     alarm_time = datetime.now()
+                    self.debug_monitor = self.dict_cfg["InitialConfig"]["debug_monitor"]
                     if base_time:
                         alarm_time_UTC = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')
                     count_num += 1
@@ -484,9 +1142,7 @@ class PSD_Monitoring(object):
                     if TCP_connect_flag == False:   
                         print("device: {} disconnect".format(clients[0]))  
                         TCP_connect_flag = self.TCPclient.connect()
-                        # time.sleep(1)
-                        # if TCP_connect_flag == False:
-                        #     continue
+                        #time.sleep(1)
                         count_num = 0 
                         alarm_time_UTC  = datetime.utcnow()
                         self.time_count_connect.append(alarm_time_UTC)
@@ -494,8 +1150,8 @@ class PSD_Monitoring(object):
                         DBname_network = self.database_info['DBname-network']
                         self.time_count_connect.append(alarm_time_UTC)
                         self.DataBase_network_send(DBname_network, clients[1], connection_status, self.time_count_connect[0])
-                        T_cls = self.display_clients()['terminal']
-                        self.main_thread(T_cls, 5, cycle, continous, base_time)             
+                        if TCP_connect_flag:
+                            count_num = 1         
                    
                     else:
                         pass
@@ -529,18 +1185,18 @@ class PSD_Monitoring(object):
                         # getting data that starts with modbus bit 1 from the registers
                         read_result = read_result.registers
                         # 读到的所有寄存器数据
-                        data_item = \
+                        self.data_item = \
                         {
                             # 表头
-                            'head':  "0x" + str(hex(read_result[0])[2:]) + str(hex(read_result[1])[2:]),
+                            # 'head':  "0x" + str(hex(read_result[0])[2:]) + str(hex(read_result[1])[2:]),
                             # 日期时间校正
-                            'Y':      self.ff(read_result[2], 'Y'),
-                            'M':      self.ff(read_result[2], 'M'),
-                            'D':      self.ff(read_result[3], 'D'),
-                            'H':      self.ff(read_result[3], 'H'),
-                            'Q':      self.ff(read_result[4], 'Q'),
-                            'S':      self.ff(read_result[4], 'S'),
-                            'ms':     self.ff(read_result[5], 'ms'),
+                            # 'Y':      self.ff(read_result[2], 'Y'),
+                            # 'M':      self.ff(read_result[2], 'M'),
+                            # 'D':      self.ff(read_result[3], 'D'),
+                            # 'H':      self.ff(read_result[3], 'H'),
+                            # 'Q':      self.ff(read_result[4], 'Q'),
+                            # 'S':      self.ff(read_result[4], 'S'),
+                            # 'ms':     self.ff(read_result[5], 'ms'),
                             # 各通道数据读取
                             'CH1':   '{:016b}'.format(read_result[7]) + '{:016b}'.format(read_result[6]),
                             'CH2':   '{:016b}'.format(read_result[9]) + '{:016b}'.format(read_result[8]),
@@ -549,442 +1205,39 @@ class PSD_Monitoring(object):
                         }
 
                         if base_time == False:
-                            alarm_time_UTC = datetime(2000 + data_item['Y'], data_item['M'], data_item['D'], data_item['H'] - 8, data_item['Q'], data_item['S'])
-                            alarm_time_UTC = alarm_time_UTC.strftime("%Y:%m:%d %H:%M:%S" + ".{}".format(data_item['ms']))
+                            alarm_time_UTC = datetime(2000 + self.data_item['Y'], self.data_item['M'], self.data_item['D'], self.data_item['H'] - 8, self.data_item['Q'], self.data_item['S'])
+                            alarm_time_UTC = alarm_time_UTC.strftime("%Y:%m:%d %H:%M:%S" + ".{}".format(self.data_item['ms']))
               
-         
-                    ###################################################################################################
-                    
-                        door_set, base_set = {}, {}
-                        door_SAVE_set, base_SAVE_set = {}, {}
-                        door_HISTORY_set, base_HISTORY_set = {}, {}
-                        new_door_HISTORY_set, new_HISTORY_set = {}, {}
-    
-                    
-                        self.LINE = {"上行": 'S', "下行": 'X'}
-                        with open(file=self.setting_addr, encoding='utf-8') as cfg:
-                            dict_cfg = json.load(cfg) 
-                        station_info = dict_cfg['TerminalClient']['T1']['station']
-                        self.StationName = list(station_info.keys())
-                        for station in self.StationName:
-                            self.line = list(station_info[station].keys())
-                            for line in self.line:
-                                RELAY, CHANNEL, CLASS = station_info[station][line]['relay'], station_info[station][line]['channel'], station_info[station][line]['class']
-                                NAME = station_info[station][line]['name']
-                                self.name = NAME
-                                self.relay = RELAY
-                                line_bool = self.LINE[line]
-                                # 获取动作逻辑配置
-                                LOGIC = station_info[station][line]['ActionLogic']
-                                logic_num = len(LOGIC)
-                                # 获取继电器端口采集数据
-                                relay_keys = list(RELAY.keys())
-                                self.relay_values = list(RELAY.values())
-                                channel = CHANNEL
-                                channel_values = list(channel.values())
-                                ch_ls = ['CH' + str(ch) for ch, group in groupby(sorted(channel_values))]
-                                ch_num = [str(ch) for ch, group in groupby(sorted(channel_values))]
-                                channel = ' '.join(ch_ls) 
-                                ch_num = ''.join(ch_num)
-                                ch_num = int(ch_num)
-                                for ch in channel_values:
-                                    collect = self.data_connect(data_item, RELAY, 'CH' + str(ch))
-                                    collect = [int(item) for item in collect]
-                                    for i in self.relay_values:
-                                        matching_key = next(k for k, v in RELAY.items() if v == i)
-                                        door_set[i] = collect[int(self.relay_values.index(i))]
-                                        door_HISTORY_set[i] = collect[int(self.relay_values.index(i))]
-                                        new_door_HISTORY_set[i] = collect[int(self.relay_values.index(i))]
-                                        door_SAVE_set[i] = collect[int(self.relay_values.index(i))]  
-                                      
-                                # 排序处理
-                                collect_ = {str(num1).zfill(2): num2 for num1, num2 in zip(relay_keys, collect)}
-                                collect_sorted = sorted(collect_.keys())
-                                collect_sorted_values = [collect_[key] for key in collect_sorted]
-
-                                # 判断继电器序列中所有机电电源端口和信号电源端口
-                                relay =  OrderedDict(sorted(RELAY.items()))
-                                relay_ls = list(relay.values())
-                                port_class = OrderedDict(sorted(CLASS.items()))
-                                port_class = {value: list(key for key, val in port_class.items() if val == value) for value in port_class.values()}
-                                EM_power, S_power = [], []
-                                for key in port_class: 
-                                    if key == 2:
-                                        for i in port_class[2]:
-                                            EM_power.append(relay[str(i)])
-                                    if key == 3:
-                                        for j in port_class[3]:
-                                            S_power.append(relay[str(j)])         
-                                EM_power_ls, S_power_ls = [], []
-                                collect_ls = collect_sorted_values
-                                for i in EM_power:
-                                    EM_power = int(collect_sorted_values[relay_ls.index(i)])
-                                    EM_power_ls.append(EM_power)
-                                for j in S_power:       
-                                    S_power = int(collect_sorted_values[relay_ls.index(j)])
-                                    S_power_ls.append(S_power)
-                                
-                            
-                                # 进去逻辑判断报警 
-                                if ((EM_power_ls != []) or (S_power_ls != [])) and ((0 in EM_power_ls) or (0 in S_power_ls)):
-                                    alert = ["异常", "Warning"]
-                                    alert_mark = 0
-                                    door_set["AlertMark"] = alert_mark
-                                    door_SAVE_set["AlertMark"] = alert_mark
-                                    door_set["alert"] = alert[0] 
-                                    door_HISTORY_set["alert"] = alert[0]
-                                    new_door_HISTORY_set["alert"] = alert[0]
-                                    self.alert_event.set()
-                                    self.DataBase_alert_record_send(self.database_info['DBname-alert_record'], "异常", station, line, alarm_time_UTC)
-                                
-                                    
-                                    # 判断机电电源和信号电源是否异常
-                                    if (0 in EM_power_ls):
-                                        state = ["机电电源异常", "EM Power Warning"]
-                                        door_set["Note"] = state[0]
-                                        door_SAVE_set["Note"] = state[1]
-                                        self.door_nop.append(door_set['Note'])
-                                        if self.EM_alert_flag:
-                                            self.normal_flag = True
-                                            self.warning_flag = True
-                                            self.undefine = True
-                                            self.CanNotJudge = True
-                                            self.EM_alert_flag = False
-                                            self.S_alert_flag = True
-                                            self.EM_S_alert_flag = True
-                                            self.alarm_record = "机电电源异常"
-                                            #self.DataBase_alert_record_send(self.database_info['DBname-alert_record'], state[0], station, line, alarm_time_UTC)
-                                        
-                                    if (0 in S_power_ls):
-                                        state = ["信号电源异常", "Signal Power Warning"]
-                                        door_set["Note"] = state[0]  
-                                        door_SAVE_set["Note"] = state[1]
-                                        self.door_nop.append(door_set['Note']) 
-                                        if self.S_alert_flag:
-                                            self.normal_flag = True
-                                            self.warning_flag = True
-                                            self.undefine = True
-                                            self.CanNotJudge = True
-                                            self.EM_alert_flag = True
-                                            self.S_alert_flag = False
-                                            #self.EM_S_alert_flag = True
-                                        
-                                        
-                                    if (0 in EM_power_ls) and (0 in S_power_ls):
-                                        state = ["机电/信号电源异常", "EM/Signal Power Warning"]
-                                        door_set["Note"] = state[0]     
-                                        door_SAVE_set["Note"] = state[1]
-                                        self.door_nop.append(door_set['Note'])
-                                        if self.EM_S_alert_flag:
-                                            self.normal_flag = True
-                                            self.warning_flag = True
-                                            self.undefine = True
-                                            self.CanNotJudge = True
-                                            self.EM_alert_flag = True
-                                            self.S_alert_flag = True
-                                            self.EM_S_alert_flag = False
-                                            self.DataBase_alert_record_send(self.database_info['DBname-alert_record'], state[0], station, line, alarm_time_UTC)
-                                
-                                elif (logic_num != 0):
-                                    for lgc in range(logic_num):
-                                        # 解析配置文件
-                                        SEQUENCE, STATE, LABEL = LOGIC[str(lgc)]["sequence"], LOGIC[str(lgc)]["state"], LOGIC[str(lgc)]["label"]
-                                        sequence = OrderedDict(sorted(SEQUENCE.items()))
-                                        sequence_ls = list(sequence.values())
-                                        # 判断动作状态
-                                        if len(sequence_ls) == len(collect_ls) and (all(sequence_ls == collect_ls for sequence_ls, collect_ls in zip(sequence_ls, collect_ls)) and (LABEL == 1)):
-                                            door_set["Note"] = STATE
-                                            self.door_nop.append(door_set['Note'])
-                                            alert = ["正常", 'Normal']
-                                            alert_mark = LABEL 
-                                            door_set["AlertMark"] = alert_mark
-                                            door_SAVE_set["AlertMark"] = alert_mark
-                                            door_SAVE_set["Note"] = 'normal'
-                                            self.DataBase_alert_settled_send(self.database_info['DBname-alert_settled'], alert[0], station, line, alarm_time_UTC)
-
-                                        if len(sequence_ls) == len(collect_ls) and (all(sequence_ls == collect_ls for sequence_ls, collect_ls in zip(sequence_ls, collect_ls)) and (LABEL == 0)):
-                                            door_set["Note"] = STATE
-                                            self.door_nop.append(door_set['Note'])
-                                            alert = ["异常", "Warning"]
-                                            alert_mark = LABEL
-                                            door_set["AlertMark"] = alert_mark
-                                            door_SAVE_set["AlertMark"] = alert_mark
-                                            door_SAVE_set["Note"] = 'warning'
-                                            self.alert_event.set()  
-                                            self.DataBase_alert_settled_send(self.database_info['DBname-alert_settled'], alert[0], station, line, alarm_time_UTC)
-                                                                
-                                        if len(sequence_ls) == len(collect_ls) and (all(sequence_ls != collect_ls for sequence_ls, collect_ls in zip(sequence_ls, collect_ls))):
-                                            state = ["无法判断", "Unable"]
-                                            door_set["Note"] = state[0]
-                                            door_SAVE_set["Note"] = state[1]
-                                            self.door_nop.append(door_set['Note'])
-                                            alert = ["异常", "Warning"]
-                                            alert_mark = -1
-                                            door_set["AlertMark"] = alert_mark
-                                            door_SAVE_set["AlertMark"] = alert_mark
-                                            door_set["alert"] = alert[0] 
-                                            door_HISTORY_set["alert"] = alert[0]
-                                            new_door_HISTORY_set["alert"] = alert[0]
-                                            self.alert_event.set()
-                                            self.DataBase_alert_settled_send(self.database_info['DBname-alert_settled'], alert[0], station, line, alarm_time_UTC)
-    
-                                            
-                                elif logic_num == 0:
-                                    state = ["正常", 'Normal']
-                                    door_set["Note"] = state[0]
-                                    door_SAVE_set["Note"] = state[1]
-                                    alert = ["正常", 'Normal']
-                                    alert_mark = 1
-                                    door_set["AlertMark"] = alert_mark
-                                    door_SAVE_set["AlertMark"] = alert_mark
-                                    door_set["alert"] = alert[0] 
-                                    door_HISTORY_set["alert"] = alert[0]
-                                    new_door_HISTORY_set["alert"] = alert[0]
-                                    self.window_show_flag = True
-                                    if self.undefine:
-                                        self.normal_flag = True
-                                        self.warning_flag = True
-                                        self.undefine = True
-                                        self.CanNotJudge = True
-                                        self.EM_alert_flag = True
-                                        self.S_alert_flag = True
-                                        self.EM_S_alert_flag = True
-                                        self.DataBase_alert_settled_send(self.database_info['DBname-alert_settled'], "正常", station, line, alarm_time_UTC)
-
-                                    
+                        self.data_process()
+                        
                     ##################################################################################################
-                    
-                    
-                                # if door_set["Note"] == "正常":
-                                #     if self.normal_flag:
-                                #         # self.normal_flag = True
-                                #         # self.warning_flag = True
-                                #         # self.undefine = True
-                                #         # self.CanNotJudge = True
-                                #         # self.EM_alert_flag = True
-                                #         # self.S_alert_flag = True
-                                #         # self.EM_S_alert_flag = True
-                                #         self.DataBase_alert_settled_send(self.database_info['DBname-alert_settled'], self.alarm_record, station, line, alarm_time_UTC)
-                                    
-                                # if door_set["Note"] == "异常":
-                                #     if self.warning_flag:
-                                #         # self.normal_flag = True
-                                #         # self.warning_flag = False
-                                #         # self.undefine = True
-                                #         # self.CanNotJudge = True
-                                #         # self.EM_alert_flag = True
-                                #         # self.S_alert_flag = True
-                                #         # self.EM_S_alert_flag = True
-                                #         self.alarm_record = "异常"
-                                #         self.DataBase_alert_record_send(self.database_info['DBname-alert_record'], "异常", station, line, alarm_time_UTC)
-                                    
-                                # if door_set["Note"] == "状态无定义":
-                                #     if self.undefine:
-                                #         # self.normal_flag = True
-                                #         # self.warning_flag = True
-                                #         # self.undefine = True
-                                #         # self.CanNotJudge = True
-                                #         # self.EM_alert_flag = True
-                                #         # self.S_alert_flag = True
-                                #         # self.EM_S_alert_flag = True
-                                #         self.DataBase_alert_settled_send(self.database_info['DBname-alert_settled'], self.alarm_record, station, line, alarm_time_UTC)
-                                    
-                                # if door_set["Note"] == "无法判断":
-                                #      if self.CanNotJudge:
-                                #         # self.normal_flag = True
-                                #         # self.warning_flag = True
-                                #         # self.undefine = True
-                                #         # self.CanNotJudge = False
-                                #         # self.EM_alert_flag = True
-                                #         # self.S_alert_flag = True
-                                #         # self.EM_S_alert_flag = True
-                                #         self.alarm_record = "无法判断"
-                                #         self.DataBase_alert_record_send(self.database_info['DBname-alert_record'], "异常", station, line, alarm_time_UTC)
-                                    
-                                # if door_set["Note"] == "机电电源异常":
-                                #    if self.EM_alert_flag:
-                                #         # self.normal_flag = True
-                                #         # self.warning_flag = True
-                                #         # self.undefine = True
-                                #         # self.CanNotJudge = True
-                                #         # self.EM_alert_flag = False
-                                #         # self.S_alert_flag = True
-                                #         # self.EM_S_alert_flag = True
-                                #         self.alarm_record = "机电电源异常"
-                                #         self.DataBase_alert_record_send(self.database_info['DBname-alert_record'], "机电电源异常", station, line, alarm_time_UTC)
-                                    
-                                # if door_set["Note"] == "信号电源异常":
-                                #     if self.S_alert_flag:
-                                #         # self.normal_flag = True
-                                #         # self.warning_flag = True
-                                #         # self.undefine = True
-                                #         # self.CanNotJudge = True
-                                #         # self.EM_alert_flag = True
-                                #         # self.S_alert_flag = False
-                                #         # self.EM_S_alert_flag = True
-                                #         self.alarm_record = "信号电源异常"
-                                #         self.DataBase_alert_record_send(self.database_info['DBname-alert_record'], "信号电源异常", station, line, alarm_time_UTC)
-                                
-                                # if door_set["Note"] == "机电/信号电源异常":
-                                #     if self.EM_S_alert_flag:
-                                #         # self.normal_flag = True
-                                #         # self.warning_flag = True
-                                #         # self.undefine = True
-                                #         # self.CanNotJudge = True
-                                #         # self.EM_alert_flag = True
-                                #         # self.S_alert_flag = True
-                                #         # self.EM_S_alert_flag = False
-                                #         self.alarm_record = "机电/信号电源异常"
-                                #         self.DataBase_alert_record_send(self.database_info['DBname-alert_record'], "机电/信号电源异常", station, line, alarm_time_UTC)
-                                        
-
-                                # 整理成统一形式
-                                door_set["StationName"] = station                                                       
-                                door_set["deviceIP"] = Device_IP  
-                                base_set["measurement"] = self.database_info['DBname-station']                
-                                base_set["tags"] = {"line": line, "Channel": channel}            
-                                base_set["time"] = alarm_time_UTC
-                                base_set["fields"] = door_set
-                                                        
-                                door_SAVE_set["StationName"] = ''.join([word[0] for word in pinyin(station, style=Style.NORMAL)])
-                                base_SAVE_set["measurement"] = self.database_info['DBname-station_SAVE']
-                                base_SAVE_set["tags"] = {"line": line_bool, "Channel": channel}
-                                base_SAVE_set["time"] = alarm_time_UTC
-                                base_SAVE_set["fields"] = door_SAVE_set
-                                
-                                base_HISTORY_set["measurement"] = self.source_measurement
-                                base_HISTORY_set["tags"] = {"line": line, "Channel": channel, "StationName": station}
-                                base_HISTORY_set["time"] = alarm_time_UTC
-                                base_HISTORY_set["fields"] = door_HISTORY_set
-                                
-                                # Getting effective data to database
-                                monitor_data = [base_set]
-                                save_data = [base_SAVE_set]
-                                history_data = [base_HISTORY_set]
-                                #print(monitor_data)
-
-                                end_time = time.time()
-                                collect_time = end_time - start_time
-                                #print("采集运行时间:", collect_time) 
-
-                                time.sleep(cycle)
-                                if (collect_time <= 0.2):      
-                                    # 送入“station”数据库
-                                    self.DBclient.switch_database(self.database_info['DBname-station']) 
-                                    self.DBclient.write_points(monitor_data)
-                                    self.DBclient.switch_database(self.database_info['DBname-station_SAVE']) 
-                                    self.DBclient.write_points(save_data)
-                                    self.DBclient.switch_database(self.database_info['DBname-station_HISTORY'])
-                                    self.DBclient.write_points(history_data) 
-
-                                    # print('                          "采集运行时间:"    {}'.format(collect_time))
-                            
-                                # 计算过车信息
-                                # notes_list = self.door_nop
-                                # if len(notes_list) == 3:
-                                #     notes_list.pop(0)
-                                #     if all(x == notes_list[0] for x in notes_list) and continous is False:
-                                #         pass
-                                #     else: 
-                                #         door_list = self.door_nop
-                                #         if len(door_list) == 3:
-                                #             door_list.pop(0)
-                                #         if door_list[0] == '正常状态' and door_list[1] == '开门':
-                                #             train_arriving_time = timeit.default_timer() 
-                                #         if door_list[0] == '关门' and door_list[1] == '门已关':
-                                #             # train dwell time or train pass frequency in the station ever 10 minutes
-                                #             train_num += 1
-                                #             train_departing_time = timeit.default_timer()
-                                #             dwell_time = train_departing_time - train_arriving_time
-                                #         print("第{}辆车，停靠用时{}秒".format(train_num, dwell_time))
-                                #         if door_list[0] == '门已关' and door_list[1] == '正常状态':   
-                                #             print("\n---------------------------------------屏蔽门正常动作--------------------------------------------") 
-                                #         # 送入"train"数据库
-                                #         DBname_train = self.database_info['DBname-train']
-                                #         self.DataBase_train_send(DBname_train, Device_IP, channel, line, train_num, dwell_time, pass_frequency) 
-        
-                except:
-                    "终端{}连接异常".format(clients[0])
-                    print('reconnecting...')
+                
+                except ModbusException as e:
+                    # 捕获modebus相关异常并处理
+                    print('reconnecting...' + str(e))
+                    TCP_connect_flag = False
+                    self.handle_modbus_exception(e)
                     if self.TCPclient is not None:
                         self.TCPclient.close()
-                    time.sleep(30)  
+                    time.sleep(4)   
+                    
+                except Exception as e:
+                    print('reconnecting...' + str(e))
+                    TCP_connect_flag = False
+                    if self.TCPclient is not None:
+                        self.TCPclient.close()
+                    time.sleep(4)  
 
-
-                # 获取时间          
-                # print("当前时间： \n", end_time)
-                elapsed_time = end_time - start_time 
-                now = datetime.now()  
-                current_minute = now.minute
-                terminal_time = now.strftime("%H:%M:%S")
-                # terminal_date = now.strftime('%Y-%m-%d %H:%M:%S')
-                local_time = time.localtime(time.time())  
-                with open(file=self.setting_addr, encoding='utf-8') as cfg:
-                    dict_cfg = json.load(cfg) 
-                export_time = dict_cfg['InitialConfig']['import_time']        
-                end_time = time.time()
-                # separate_time = "00:00:00"
-
-                # 获取昨天和前天和大后天的日期
-                yesterday = (datetime.now() - timedelta(1)).strftime('%Y%m%d')
-                day_before_yesterday = (datetime.now() - timedelta(2)).strftime('%Y-%m-%d')
-                Two_days_later = (self.now_datetime + timedelta(2)).strftime('%Y-%m-%d 01:00:00')
-
-                # 时间戳转换
-                start_time_info = datetime.fromtimestamp(time_info).strftime('%Y-%m-%d') 
-                end_time_info = datetime.fromtimestamp(end_time).strftime('%Y-%m-%d') 
-                
-                end_time_datetime = datetime.fromtimestamp(end_time)
-                end_time_minus_one_day = end_time_datetime - timedelta(days=1) 
-                end_time_info_minus_one_day = end_time_minus_one_day.strftime('%Y-%m-%d')
-
-                if (current_minute == 0):
-                    # 清空显示界面缓存
-                    self.DBclient.drop_database(self.database_info['DBname-station']) 
-                    self.DBclient.create_database(self.database_info['DBname-station'])
-
-                if (terminal_time == export_time):              
-                    # 备份历史记录数据库,分离出一个新表
-                    self.source_measurement = self.database_info['DBname-station_HISTORY']
-                    new_measurement = self.source_measurement + "_" + now.strftime('%Y%m%d') 
-                    new_HISTORY_set["measurement"] = new_measurement
-                    new_HISTORY_set["tags"] = {"line": line, "Channel": channel, "StationName": station, 'alert': alert[0]}
-                    new_HISTORY_set["time"] = alarm_time_UTC
-                    del door_HISTORY_set['alert'] 
-                    new_HISTORY_set["fields"] = door_HISTORY_set
-                    new_history_data = [new_HISTORY_set]
-                    self.DBclient.switch_database(self.source_measurement)
-                    self.DBclient.write_points(new_history_data) 
-                    query_separate = f"SELECT * FROM {self.source_measurement} WHERE time > now() - '{now.strftime('%Y-%m-%d')}T16:00:00Z'"
-                    print(query_separate)
-                    result = self.DBclient.query(query_separate)  
-                    points = list(result.get_points())  
-                    # 获取新point
-                    i = 0
-                    new_points = []  
-                    for point in points: 
-                        fields = {}
-                        for relay in self.relay_values:
-                            fields[relay] = point[relay]
-                        # 假设 point 是一个字典，包含了 time, tags, 和 fields  
-                        new_point = {  
-                            "measurement": new_measurement,  
-                            "tags": {"line": point['line'], "Channel": point['Channel'], "StationName": point['StationName'], "alert": point['alert']},
-                            "fields": fields,
-                            "time": point['time']
-                        }
-                        new_points.append(new_point)  
-                        i += 1
-                        if(i%10000 == 0):
-                            # 批量写入新measurement  
-                            self.DBclient.write_points(new_points)
-                            new_points = []  
-                    n += 1
-                    if n%2 == 0:
-                        # 每两天清除当天表历史记录中数据
-                        query_delete = f"DELETE FROM {self.source_measurement}"
-                        self.DBclient.query(query_delete) 
-                        n = 0
+                      
+                # if (delete_db_start_time < terminal_time <= delete_db_end_time) and (self.dele == False):     # 到时间且未进行清表则执行
+                #     day_before_yesterday_utc = (datetime.now(pytz.utc) - timedelta(2)).strftime('%Y-%m-%dT%H:%M:%SZ')
+                #     try:
+                #         # 清除前天表历史记录中数据
+                #         query_delete = f"DELETE FROM {self.source_measurement} WHERE time > '{day_before_yesterday_utc}' - 1d"
+                #         self.DBclient.query(query_delete) 
+                #         self.dele = True  # 进入当天，已进行清表，重新置分表flag，等待下次到时间进入
+                #     except:
+                #         self.dele = False
 
         #             try:
         #                 # 从influxdb导出CSV格式文件操作
@@ -1078,7 +1331,24 @@ class PSD_Monitoring(object):
             
         #             # query_separate = f"SELECT * INTO {new_measurement} FROM {self.source_measurement} WHERE time > now() - '{now.strftime('%Y-%m-%d')}T16:00:00Z'"  
         #             # self.DBclient.query(query_separate)
+
    
+                end_time = datetime.now()  
+                collect_time = end_time - start_time
+               # milliseconds_collect_time = collect_time.total_seconds() * 1000
+               # self.DataBase_collect_time_send("collect_time", milliseconds_collect_time, alarm_time_UTC)
+                # print('                          "采集运行时间:"    {}'.format(collect_time))
+
+                if collect_time.total_seconds() < 0.18:
+                    sleepT = 0.18 - collect_time.total_seconds()
+                    time.sleep(sleepT)
+
+                end_time = datetime.now()  
+                collect_time = end_time - start_time
+                milliseconds_collect_time = collect_time.total_seconds() * 1000
+                if self.debug_monitor:
+                    self.monitor_object.DataBase_collect_time_send(milliseconds_collect_time, alarm_time_UTC)   
+
         except Exception as e:
             print(f"捕获异常:{e}")
             # 在调试时确保清理操作被执行
@@ -1092,20 +1362,43 @@ class PSD_Monitoring(object):
             sock.connect((host, port))
         except :
             pass
-        return sock               
-                
-              
+        return sock  
+    
+    def handle_modbus_exception(self, e):  
+        if isinstance(e, ModbusIOException):  
+            # 处理I/O异常，如连接问题  
+            print("I/O Exception:" + str(e))  
+            # 可以尝试重新连接或通知用户检查网络连接  
+        elif isinstance(e, ModbusException):  
+            # 处理其他Modbus异常  
+            # 注意：这里不会直接区分Modbus协议中的具体异常代码  
+            # 但你可以根据异常消息进行更细致的处理  
+            print("Modbus Exception:" + str(e))  
+            if "Illegal function" in str(e):  
+                # 处理非法功能码异常  
+                print("Illegal function requested.")  
+            # ... 进行相应的处理  
+            elif "Slave device or server failure" in str(e):  
+                # 处理从设备或服务器故障  
+                print("Slave device or server failure.")  
+                # ... 进行相应的处理  
+            # ... 可以添加更多基于消息内容的判断  
+        else:  
+            # 处理未知异常  
+            print("Unknown Exception:" + str(e))  
+                     
+                   
     def main_thread(self, T_cls, T, cycle, continous, base_time):  
         connect_flag = True
         sk = None
-        time.sleep(T)   
+       #time.sleep(T)   
         if connect_flag:
             for cls in T_cls.keys():
                 clients = [cls, T_cls[cls]['host'], T_cls[cls]['port']]
                 # starting thread to collect data
                 network_connect_flag = True
-                terminal_thread = threading.Thread(target=self.main, kwargs={'clients': clients, 'cycle': cycle, 'continous': continous, 'network_connect_flag': network_connect_flag, 'base_time': base_time})
-                terminal_thread.start()
+                collect = threading.Thread(target=self.main, kwargs={'clients': clients, 'cycle': cycle, 'continous': continous, 'network_connect_flag': network_connect_flag, 'base_time': base_time})
+                collect.start()
                 
    
     def run(self, cycle, continous, base_time, save_all):    
@@ -1113,10 +1406,15 @@ class PSD_Monitoring(object):
         self.DataBase_connect(self.database_info['host'], self.database_info['port'], self.database_info['username'], self.database_info['password'], save_all)
         # ModbusTCP connecting and create threads in listenning network loop one by one
         T_cls = self.display_clients()['terminal']
-        self.main_thread(T_cls, 3, cycle, continous, base_time)
+        self.main_thread(T_cls, 0, cycle, continous, base_time)
+        time.sleep(3)
+        write_db = threading.Thread(target=self.write_databases)
+        write_db.start()
+        time.sleep(3)
         alert_thread = threading.Thread(target=self.play_alarm())
         alert_thread.start()
         print("starting thread")
+
 
 
 class StartupApp:
@@ -1161,7 +1459,7 @@ class StartupApp:
             # Close the window after loading completes
             self.root.destroy()  
 
-            
+       
 def app_close():
     # 释放文件锁
     if lock_file:
