@@ -550,12 +550,12 @@ class PSD_Monitoring(object):
             sep_client.switch_database(self.source_measurement)
             while True: 
                 start_time = datetime.now() 
-                if(self.sep == True):
-                    # 结束线程 
-                    sep_client.close()
-                    self.sep_event.clear()     
-                    self.create_sep_thread = True
-                    break
+                # if(self.sep == True):
+                #     # 结束线程 
+                #     sep_client.close()
+                #     self.sep_event.clear()     
+                #     self.create_sep_thread = True
+                #     break
                 try:
                     # yesterday_utc = (datetime.now(pytz.utc) - timedelta(1)).strftime('%Y-%m-%dT%H:%M:%SZ')
                     # day_before_yesterday = (datetime.now() - timedelta(2)).strftime('%Y-%m-%d')
@@ -614,11 +614,16 @@ class PSD_Monitoring(object):
                     min += 1
                     if min >= 24*60: 
                         # 分完但未清表 
+                        min = 0
                         self.sep = True      
                         self.dele = False 
-                        break
+                        self.create_sep_thread = True
+                         # 结束线程 
+                        sep_client.close()
+                        self.sep_event.clear()     
+                        break 
                 except Exception as e:
-                    self.sep = False
+                    self.sep = True
                     self.dele = True
                     print('run to write points exception:' + str(e))
                     traceback.print_exc()
@@ -656,7 +661,6 @@ class PSD_Monitoring(object):
 
         # create_sep_time <= terminal_time < "23:59:59"
         if (create_sep_time <= terminal_time < export_db_start_time) and (self.create_sep_thread == True):
-            # 创建分表thread并启动
             sep = threading.Thread(target=self.separation_table)
             sep.start()
             self.create_sep_thread = False
@@ -943,6 +947,7 @@ class PSD_Monitoring(object):
             self.station = station
             self.alert = alert[0]
             self.sep_event.set()
+            self.sep = True
         else:
             if self.debug_monitor:
                 self.monitor_object.DataBase_sep_table_time_send(0, alarm_time_UTC)
@@ -960,7 +965,6 @@ class PSD_Monitoring(object):
             except:
                 self.dele = False
                 self.sep = False
-
         end_time = datetime.now()  
         # process_time = end_time - start_time
         #milliseconds_process_time = process_time.total_seconds() * 1000
