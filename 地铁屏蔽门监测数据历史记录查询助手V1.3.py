@@ -393,6 +393,7 @@ class HistoryBrowser(QMainWindow):
                 self.data_row_col_buf.append([row, columm, str(point[mark])])
                 columm += 1    
             row += 1
+            self.all_data_label.setText("总量：{}".format(row))
         return self.data_row_col_buf
 
 
@@ -417,6 +418,8 @@ class HistoryBrowser(QMainWindow):
             all_point_buf.append(lp) 
         # 判断有无相同数据
         all_point_buf = [x for i, x in enumerate(all_point_buf) if x not in all_point_buf[:i]] 
+        self.all_data_label.clear()
+        self.all_data_label.setText("总量：{}".format(len(all_point_buf)))
         self.merge_enable = False
         return all_point_buf
     
@@ -501,7 +504,6 @@ class HistoryBrowser(QMainWindow):
             return []  # 或者抛出异常  
         start_time = time.time()  
         self.total_data_size = len(data_buf)  
-        self.all_data_label.setText("总量：{}".format(self.total_data_size))
         items_per_block = items_max * (len(self.data_head) + 1)  
         actual_items_per_block = min(items_per_block, self.total_data_size)  
   
@@ -600,10 +602,8 @@ class HistoryBrowser(QMainWindow):
                         middle_point = middle_query.get_points()
                         # 中间连续的point
                         self.point_buf.append(middle_point)
-
                  # 尾项point
                 self.point_buf.append(last_point)
-
                 return self.point_buf
  
 
@@ -625,9 +625,7 @@ class HistoryBrowser(QMainWindow):
                     print(self.one_day_query)
                 one_day_query = self.client.query(self.one_day_query)
                 result_point = one_day_query.get_points()
-                
                 return result_point
-
             else:
                 # 昨天和今天
                 self.one_day_query = f"SELECT * FROM {self.one_day_measurement} WHERE time >= '{self.from_date_str}' AND time < '{self.to_date_str}' AND StationName = \'{self.site}\' AND line = \'{self.direction}\'"
