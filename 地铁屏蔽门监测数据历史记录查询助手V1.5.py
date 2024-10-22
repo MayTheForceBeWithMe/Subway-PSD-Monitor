@@ -2,7 +2,7 @@ import sys
 import os
 import json
 import time
-import easygui 
+import threading
 import pandas as pd 
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
@@ -34,15 +34,20 @@ def CheckIsInTimeRange(x,st,end):
     else:
         return False
 
+
+
 class HistoryBrowser(QMainWindow):
     def __init__(self):
         self.plot_title = "" 
         self.time_buf = []
         self.relay_buf = []
-        self.data_row_col_buf = []
         self.row_buf = []
         self.point_buf = []
         self.excel_data_buf = []
+        self.data_row_col_buf = []
+        self.all_last_point_buf = []
+        self.all_middle_point_buf = []
+        self.all_first_point_buf = []
         self.data_split_buf = 0
         self.check_state = True
         self.i = False
@@ -59,6 +64,12 @@ class HistoryBrowser(QMainWindow):
         self.page_turn = False
         self.page_last = True
         self.page_next = True
+        self.fp_finish = False
+        self.mp_finish = False
+        self.lp_finish = False
+        self.fp_event = threading.Event()
+        self.mp_event = threading.Event()
+        self.lp_event = threading.Event()
         self.pages_num = 0
         self.pages_max = 0
         self.total_data_size = 0
@@ -72,7 +83,8 @@ class HistoryBrowser(QMainWindow):
         with open(file=self.setting_addr, encoding='utf-8') as cfg:
             self.dict_cfg = json.load(cfg) 
         self.host = self.dict_cfg["DatabaseClient"]['host']
-        self.database = self.dict_cfg["DatabaseClient"]['DBname'][2]
+        self.database_src = self.dict_cfg["DatabaseClient"]['DBname'][2]
+        self.database_sep = self.dict_cfg["DatabaseClient"]['DBname'][3]
         self.port = self.dict_cfg["DatabaseClient"]['port']
         self.username = self.dict_cfg["DatabaseClient"]['username']
         self.password = self.dict_cfg["DatabaseClient"]['password']
@@ -96,14 +108,16 @@ class HistoryBrowser(QMainWindow):
         os.popen(self.influxdb_conf) 
 
         # 连接数据库
-        self.client = InfluxDBClient(host=self.host, port=self.port, database=self.database, username=self.username, password=self.password)
-        self.database = str(self.database)
+        self.client_src = InfluxDBClient(host=self.host, port=self.port, database=self.database_src, username=self.username, password=self.password)
+        self.database_src = str(self.database_src)
+        self.client_sep = InfluxDBClient(host=self.host, port=self.port, database=self.database_sep, username=self.username, password=self.password)
+        self.database_sep = str(self.database_sep)
         time.sleep(5)
+
         
         # 启动界面
         self.initUI()
         
-
 
     def initUI(self):
         self.site_select = QComboBox()
@@ -244,9 +258,7 @@ class HistoryBrowser(QMainWindow):
         quary_pages.addWidget(self.plot_button)
         quary_pages.addWidget(self.clear_button)
 
-
         # quary_pages.addWidget(self.item_label)
-
 
         # button_layout = QHBoxLayout()
         # button_layout.addWidget(self.query_button)
@@ -380,48 +392,130 @@ class HistoryBrowser(QMainWindow):
                     return self.pages_num
             except:
                 QMessageBox.critical(self, '输入错误', "请输入正确页码", QMessageBox.Ok) 
+
+    
+    def point_ID_count(self, data_buf):
+        unique_list = []  
+        for item in data_buf:  
+            if item not in unique_list:  
+                unique_list.append(item)
+        return unique_list
     
 
-    def read_result_data(self, result_data):
-        row = 0  
+    def read_result_data(self, result_data, set_row, point_name): 
+        if (point_name == 'first') or (point_name == 'point'): 
+            row = 0
+        if (point_name == 'last') or (point_name == 'middle'): 
+            row = set_row + 1 
         for point in result_data:  
-            time_record = self.time_change(point['time'])
+            time_record = self.time_change(point['time'])  
             self.table.insertRow(row)  
-            self.data_row_col_buf.append([row, 0, str(time_record)])
+            self.data_row_col_buf.append([row, 0, str(time_record)])   
             columm = 1  
-            for mark in self.relay_mark_name:   
-                self.data_row_col_buf.append([row, columm, str(point[mark])])
-                columm += 1    
-            row += 1
-            self.all_data_label.setText("总量：{}".format(row))
-        return self.data_row_col_buf
+            relay_data = [str(point[mark]) for mark in self.relay_mark_name]  
+            for value in relay_data:  
+                self.data_row_col_buf.append([row, columm, value])  
+                columm += 1  
+            row += 1  
+            # print("{} -> 当前第{}行数据".format(point_name, row))  
+            if not self.merge_enable:  
+                self.all_data_label.setText("总量：{}".format(row)) 
+        if (point_name == 'first') or (point_name == 'last') or (point_name == 'middle'):
+            if self.data_row_col_buf == []:
+                self.quary_null = True
+                QMessageBox.information(self, '查询完成', "未查询到数据", QMessageBox.Ok) 
+            return row 
+        else:
+            return self.data_row_col_buf
+    
+    ######################################################################################
+    
+    def first_point(self):
+        # self.fp_event.wait()
+        first_point = self.result_point[0]
+        self.first_row = self.read_result_data(first_point, 0, "first")
+        self.fp_finish = True
+        self.fp_event.clear()
 
+    def middle_point(self):
+        # self.mp_event.wait()
+        count_buf = 0
+        row_num = self.first_row
+        middle_point = [mp for mp in self.result_point[1:-1]]
+        while count_buf < len(middle_point):
+            row_num  = self.read_result_data(middle_point[count_buf], row_num, "middle")
+            count_buf += 1
+        self.last_row = row_num
+        self.mp_finish = True
+        self.mp_event.clear()
+        
+    def last_point(self):
+        # self.lp_event.wait()
+        self.last_row = self.first_row
+        last_point = self.result_point[len(self.result_point)-1]
+        self.last_row = self.read_result_data(last_point, self.last_row, "last")
+        self.lp_finish = True
+        self.lp_event.clear()
+
+     ######################################################################################
 
     def merge_measurement(self, result_point):
-        # 整合所有point
+        # 整合所有获取到的point
+        self.result_point = result_point
         all_point_buf = []
-        # first point
-        first_point = result_point[0]
-        first_point_buf = self.read_result_data(first_point)
-        for fp in first_point_buf:
-            all_point_buf.append(fp)
-        # # middle point
-        # middle_point = [mp for mp in result_point[1:-1]]
-        # middle_point_buf_ls = [mp for mp in self.read_result_data(middle_point)]
-        # for middle_point_buf in middle_point_buf_ls:
-        #     for mp in middle_point_buf:
-        #         all_point_buf.append(mp) 
-        # last point
-        last_point = result_point[len(result_point)-1]
-        last_point_buf = self.read_result_data(last_point)
-        for lp in last_point_buf:
-            all_point_buf.append(lp) 
-        # 判断有无相同数据
-        all_point_buf = [x for i, x in enumerate(all_point_buf) if x not in all_point_buf[:i]] 
+        
+        # self.fp_event.clear()
+        # self.mp_event.clear()
+        # self.lp_event.clear()
+
+        # self.fp_event.set()
+        # self.lp_event.set()
+
+        first_point_start_quary_time = time.time()
+        self.first_point()
+        first_point_end_quary_time = time.time()
+        self.first_point_quary_time = first_point_end_quary_time - first_point_start_quary_time
+
+        # 判断是否需要处理middle point
+        if len(self.result_point) > 2:
+            middle_point_start_quary_time = time.time()
+            self.middle_point()
+            middle_point_end_quary_time = time.time()
+            self.middle_point_quary_time = middle_point_end_quary_time - middle_point_start_quary_time
+            # self.mp_event.set()
+        else:
+            self.mp_finish = True  
+
+        last_point_start_quary_time = time.time()
+        self.last_point()
+        last_point_end_quary_time = time.time()
+        self.last_point_quary_time = last_point_end_quary_time - last_point_start_quary_time
+
+        print("前 - 查询时间：{}秒 遍历时间：{}秒".format(self.first_table_quary_time, self.first_point_quary_time))
+        print("中 - 查询时间：{}秒 遍历时间：{}秒".format(self.middle_table_quary_time, self.middle_point_quary_time))
+        print("后 - 查询时间：{}秒 遍历时间：{}秒".format(self.last_table_quary_time, self.last_point_quary_time))
+        print("=======================================================")
+        print("总 - 查询时间：{}秒 遍历时间：{}秒".format(self.first_table_quary_time+self.middle_table_quary_time+self.last_table_quary_time, self.first_point_quary_time+self.middle_point_quary_time+self.last_point_quary_time))
+        
+        while True:
+            # 是否各point完成处理
+            if self.fp_finish and self.mp_finish and self.lp_finish:
+                # 合并汇总
+                # all_point_buf.extend(self.all_first_point_buf)
+                # if len(self.result_point) > 2:
+                #     all_point_buf.extend(self.all_middle_point_buf)  
+                # all_point_buf.extend(self.all_last_point_buf)
+                #all_point_buf = self.point_ID_count(all_point_buf)
+                # all_point_buf = [x for i, x in enumerate(all_point_buf) if x not in all_point_buf[:i]]     
+                break 
+
         self.all_data_label.clear()
-        self.all_data_label.setText("总量：{}".format(len(all_point_buf)))
+        self.all_data_label.setText("总量：{}".format(len(self.data_row_col_buf)))
+        self.fp_finish = False
+        self.mp_finish = False
+        self.lp_finish = False
         self.merge_enable = False
-        return all_point_buf
+        return self.data_row_col_buf
     
         
     def from_Excel(self, result_data):
@@ -440,19 +534,17 @@ class HistoryBrowser(QMainWindow):
                 self.data_row_col_buf.append([row_idx, col_idx, str(row[df_column])])  
         return self.data_row_col_buf
     
-
     def from_Database(self, result_data):  
         if self.merge_enable:
             return self.merge_measurement(result_data)
         else:
-            if self.read_result_data(result_data) == []:
+            if self.read_result_data(result_data, 0, "point") == []:
                 self.quary_null = True
                 QMessageBox.information(self, '查询完成', "未查询到数据", QMessageBox.Ok)
-                return None 
+                return
             else:
-                return self.read_result_data(result_data)
+                return self.read_result_data(result_data, 0, "point")
             
-
     def data_split(self, data_buf):
         start_time = time.time() 
         item_max = int(self.items_select.currentText())
@@ -462,7 +554,6 @@ class HistoryBrowser(QMainWindow):
         self.processing_time = end_time - start_time
         return self.__data_split__
     
-
     def display_data(self, page_num):
         self.table.setUpdatesEnabled(False)
         data_split_buf = self.data_split_buf[page_num-1]
@@ -482,7 +573,7 @@ class HistoryBrowser(QMainWindow):
                 else: 
                     item = QTableWidgetItem(str(value))
                 self.table.setItem(row, column, item)
-        elif page_num == 1 :
+        elif page_num == 1:
             for data in data_split_buf:
                 self.table.setItem(data[0], data[1], QTableWidgetItem(data[2])) 
                 #self.table.item(data[0], data[1]).setTextAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
@@ -529,8 +620,9 @@ class HistoryBrowser(QMainWindow):
 ###########################################################################################################################################         
 
     def CrossingDayAndSplicingTable(self, query_day_range):
-        start_day = self.to_day
-        end_day = self.from_day
+        start_day = self.from_day
+        end_day = self.to_day
+        now_day = datetime.now().day
         delta = self.end_datetime_obj - self.start_datetime_obj  
         self.days_diff = delta.days  # 这将给出整数部分的天数差 
         total_seconds = delta.total_seconds()  
@@ -554,83 +646,102 @@ class HistoryBrowser(QMainWindow):
             while current_date <= end_date:  
                 date_list.append(current_date.strftime('%Y-%m-%d'))  # 将日期添加到列表中  
                 current_date += timedelta(days=1)  # 递增日期  
-            self.one_day_measurement = self.database
+            self.one_day_measurement = self.database_src
 
             ######################################逐个查询数据并拼接######################################
 
             # 查询天数判断
-            if ((self.days_diff >= 1) and (datetime.now().day != start_day) and (datetime.now().day != end_day) and (start_day != end_day)) or ((self.days_diff == 0) and (len(date_list) >= 2)):
+            if ((self.days_diff >= 0) and (now_day != start_day) and (start_day != end_day)) and (len(date_list) >= 2):
                 # 1天以上（后期优化）
                 self.merge_enable = True
-
                 self.crossing_multiple_days =True
+
                 # 历史某天跨天24H查询
                 date_buf = [dat.replace('-', '') for dat in date_list] 
 
                 # 获取所有measurement表名称
                 if(self.days_diff == 1):
-                    measurement_buf = [self.database + "_" + data_ls for data_ls in date_buf] 
+                    measurement_buf = [self.database_src + "_" + data_ls for data_ls in date_buf] 
                 else:
-                    measurement_buf = [self.database + "_" + date for date in date_buf] 
+                    measurement_buf = [self.database_src + "_" + date for date in date_buf] 
                     measurement_buf = [x for i, x in enumerate(measurement_buf) if x not in measurement_buf[:i]] 
-                print(measurement_buf)
 
                 # 首项measurement
                 first_measurement = measurement_buf[0]
+                quary_start_time = time.time()
                 first_query = f"SELECT * FROM {first_measurement} WHERE time >= '{self.from_date_str}' AND time < '{start_datetime}T15:59:59Z' AND StationName = \'{self.site}\' AND line = \'{self.direction}\'"
                 print(first_query)
-                first_query = self.client.query(first_query)
+                first_query = self.client_sep.query(first_query)
                 first_point = first_query.get_points()
+                quary_end_time = time.time()
+                self.first_table_quary_time = quary_end_time - quary_start_time
                 
-
                 # 尾项measurement
                 last_measurement = measurement_buf[len(measurement_buf)-1]
+                quary_start_time = time.time()
+                print(date_list[len(measurement_buf)-1], now.date())
+                if date_list[len(measurement_buf)-1] == now.date():
+                    last_measurement = 'station_HISTORY'
                 last_query = f"SELECT * FROM {last_measurement} WHERE time >= '{start_datetime}T16:00:00Z' AND time < '{self.to_date_str}' AND StationName = \'{self.site}\' AND line = \'{self.direction}\'"
                 print(last_query)
-                last_query = self.client.query(last_query)
+                last_query = self.client_sep.query(last_query)
                 last_point = last_query.get_points()
+                quary_end_time = time.time()
+                self.last_table_quary_time = quary_end_time - quary_start_time
                 
-
                 # 首项point
                 self.point_buf.append(first_point)
                 if (len(measurement_buf) > 2):
                     # 中间连续的measurement
-                    middle_measurement_buf = measurement_buf[1:-1]
+                    measurement_buf.pop(0)
+                    measurement_buf.pop(len(measurement_buf)-1) 
+                    middle_measurement_buf = measurement_buf
+                    quary_start_time = time.time()
                     for middle_measurement in middle_measurement_buf:
                         middle_query = f"SELECT * FROM {middle_measurement} WHERE StationName = \'{self.site}\' AND line = \'{self.direction}\'"
-                        middle_query = self.client.query(middle_query)
+                        print(middle_query)
+                        middle_query = self.client_sep.query(middle_query)
                         middle_point = middle_query.get_points()
                         # 中间连续的point
                         self.point_buf.append(middle_point)
-                 # 尾项point
+                    quary_end_time = time.time()
+                    self.middle_table_quary_time = quary_end_time - quary_start_time
+                # 尾项point
                 self.point_buf.append(last_point)
+
+                # 开启分表point查询线程
+                # threading.Thread(target=self.first_point).start()
+                # threading.Thread(target=self.middle_point).start()
+                # threading.Thread(target=self.last_point).start()
                 return self.point_buf
  
 
-            elif (self.days_diff == 0) and (len(date_list) == 1):
+            elif (self.days_diff == 0 and len(date_list) == 1):
                 # 单日查询，无需拼接
-                if (start_day == end_day) and (datetime.now().day != start_day) and (datetime.now().day != end_day):
+                if (start_day == end_day) and (now_day != start_day) and (now_day != end_day):
                     # 历史某天
                     self.one_day_measurement = self.one_day_measurement + "_" + end_datetime.replace('-', '') 
                     self.one_day_query = f"SELECT * FROM {self.one_day_measurement} WHERE time >= '{self.from_date_str}' AND time < '{self.to_date_str}' AND StationName = \'{self.site}\' AND line = \'{self.direction}\'"
                     print(self.one_day_query)
-                elif (datetime.now().day == start_day) and (datetime.now().day == start_day):
+                    one_day_query = self.client_sep.query(self.one_day_query)
+                elif (now_day == start_day) and (now_day == start_day):
                     # 当前天
                     self.one_day_query = f"SELECT * FROM {self.one_day_measurement} WHERE time >= '{self.from_date_str}' AND time < '{self.to_date_str}' AND StationName = \'{self.site}\' AND line = \'{self.direction}\'"
                     print(self.one_day_query)
+                    one_day_query = self.client_src.query(self.one_day_query)
                 else:
                     # 历史某天
                     self.one_day_measurement = self.one_day_measurement + "_" + end_datetime.replace('-', '') 
                     self.one_day_query = f"SELECT * FROM {self.one_day_measurement} WHERE time >= '{self.from_date_str}' AND time < '{self.to_date_str}' AND StationName = \'{self.site}\' AND line = \'{self.direction}\'"
                     print(self.one_day_query)
-                one_day_query = self.client.query(self.one_day_query)
+                    one_day_query = self.client_sep.query(self.one_day_query)
                 result_point = one_day_query.get_points()
                 return result_point
             else:
                 # 昨天和今天
                 self.one_day_query = f"SELECT * FROM {self.one_day_measurement} WHERE time >= '{self.from_date_str}' AND time < '{self.to_date_str}' AND StationName = \'{self.site}\' AND line = \'{self.direction}\'"
                 print(self.one_day_query)
-                one_day_query = self.client.query(self.one_day_query)
+                one_day_query = self.client_src.query(self.one_day_query)
                 result_point = one_day_query.get_points()
                 return result_point
 
@@ -657,15 +768,18 @@ class HistoryBrowser(QMainWindow):
         return [k for k, v in d.items() if v == value]  
     
 ###############################################################################################
-###############################################################################################
-###############################################################################################
-###############################################################################################
 
     def query_data(self):
         self.q = True
-        # 获取列的数量  \
+        # 获取列的数量  
         self.table.setRowCount(0)
         column_count = self.table.columnCount()  
+        self.all_first_point_buf.clear()
+        self.all_middle_point_buf.clear()
+        self.all_last_point_buf.clear()
+        self.data_row_col_buf.clear()
+        self.all_data_label.clear()
+        self.point_buf.clear()
         # 遍历所有列，将表头设置为空字符串  
         for column in range(column_count):  
             self.table.setHorizontalHeaderItem(column, QTableWidgetItem("")) 
@@ -698,11 +812,9 @@ class HistoryBrowser(QMainWindow):
             from_day_in_future = ((now_day < self.from_day) and (now_month <= self.from_month))
             self.all_pages_label.setText("当前第{}页 共{}页 ".format("  ", "  "))
      
-  
             # 从QDateTime对象中提取日期部分  
             # 注意：QDate是从QDateTime中直接转换而来的，它只包含年、月、日  
 
-    
             self.table.setRowCount(0)  # 清空表格内容
             self.chart.removeAllSeries()
             series = QLineSeries()
@@ -751,7 +863,8 @@ class HistoryBrowser(QMainWindow):
                         #QMessageBox.information(self, '查询完成', "查询时间为{}秒".format(self.quary_time), QMessageBox.Ok) 
                         self.all_pages_label.setText("当前第{}页 共{}页".format(self.pages_num, self.pages_max))
                         self.page_turn = True
-                    except:
+                    except Exception as e:
+                        print(e)
                         if self.quary_null == False:
                             QMessageBox.critical(self, '查询错误', "数据查询异常", QMessageBox.Ok) 
                         else:
@@ -762,10 +875,12 @@ class HistoryBrowser(QMainWindow):
                         QMessageBox.warning(self, '警告', "查询时间范围设置有误", QMessageBox.Ok) 
                     else:
                         QMessageBox.warning(self, '警告', "查询时间范围为24小时内", QMessageBox.Ok)
-            self.client.close()
+            self.client_src.close()
+            self.client_sep.close()
         except:
             QMessageBox.critical(self, '错误', "查询时间输入格式有误", QMessageBox.Ok)
-            self.client.close()
+            self.client_src.close()
+            self.client_sep.close()
             formatted_time = now.strftime("%Y-%m-%d %H:%M:%S") 
             self.to_date.setText(formatted_time) 
             yesterday = now - timedelta(days=1)  
@@ -773,9 +888,6 @@ class HistoryBrowser(QMainWindow):
             self.from_date.setText(formatted_yesterday) 
 
 ###############################################################################################
-###############################################################################################
-###############################################################################################
-###############################################################################################      
     
     def import_data(self):
         self.q = True
@@ -831,7 +943,8 @@ class HistoryBrowser(QMainWindow):
         except:
             QMessageBox.critical(self, '导入错误', "文件无法正常导入", QMessageBox.Ok) 
         self.i = True
-        self.client.close()
+        self.client_src.close()
+        self.client_sep.close()
 
 
     def export_data(self):
@@ -900,6 +1013,7 @@ class HistoryBrowser(QMainWindow):
         self.q = False
         self.pages_max = 0
         self.pages_num = 0
+        self.all_data_label.clear()
         self.table.setRowCount(0)
         # self.from_date.setDateTime(QDateTime.currentDateTime().addDays(-1))
         # self.to_date.setDateTime(QDateTime.currentDateTime())  
@@ -946,6 +1060,7 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     browser = HistoryBrowser()
     browser.show()
-    browser.client.close()
+    browser.client_src.close()
+    browser.client_sep.close()
     sys.exit(app.exec_())
 
