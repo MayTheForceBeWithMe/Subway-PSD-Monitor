@@ -171,6 +171,7 @@ class PSD_Monitoring(object):
             'DBname-station':                  self.display_clients()['database']['DBname-station'],
             'DBname-station_SAVE':             self.display_clients()['database']['DBname-station_SAVE'],
             'DBname-station_HISTORY':          self.display_clients()['database']['DBname-station_HISTORY'],
+            'DBname-station_HISTORY_memory':   self.display_clients()['database']['DBname-station_HISTORY_memory'],
             'DBname-train':                    self.display_clients()['database']['DBname-train'],
             "DBname-network":                  self.display_clients()['database']['DBname-network'],
             "DBname-alert_record":             self.display_clients()['database']['DBname-alert_record'],
@@ -284,20 +285,21 @@ class PSD_Monitoring(object):
         DBname_station = self.dict_cfg['DatabaseClient']['DBname'][0]
         DBname_station_SAVE = self.dict_cfg['DatabaseClient']['DBname'][1]
         DBname_station_HISTORY = self.dict_cfg['DatabaseClient']['DBname'][2]
+        DBname_station_HISTORY_memory = self.dict_cfg['DatabaseClient']['DBname'][3]
         # 过车记录
-        DBname_train = self.dict_cfg['DatabaseClient']['DBname'][3]
+        DBname_train = self.dict_cfg['DatabaseClient']['DBname'][4]
         # 网络记录
-        DBname_network = self.dict_cfg['DatabaseClient']['DBname'][4]
+        DBname_network = self.dict_cfg['DatabaseClient']['DBname'][5]
         # 报警记录
-        DBname_alert_record = self.dict_cfg['DatabaseClient']['DBname'][5]
-        DBname_alert_check = self.dict_cfg['DatabaseClient']['DBname'][6]
-        DBname_alert_settled = self.dict_cfg['DatabaseClient']['DBname'][7]
-        DBname_alert_time_consuming = self.dict_cfg['DatabaseClient']['DBname'][8]
+        DBname_alert_record = self.dict_cfg['DatabaseClient']['DBname'][6]
+        DBname_alert_check = self.dict_cfg['DatabaseClient']['DBname'][7]
+        DBname_alert_settled = self.dict_cfg['DatabaseClient']['DBname'][8]
+        DBname_alert_time_consuming = self.dict_cfg['DatabaseClient']['DBname'][9]
         # 采集与处理时间
-        DBname_collect_time = self.dict_cfg['DatabaseClient']['DBname'][9]
-        DBname_process_time = self.dict_cfg['DatabaseClient']['DBname'][10]
-        DBname_write_time = self.dict_cfg['DatabaseClient']['DBname'][11]
-        DBname_sep_table_time = self.dict_cfg['DatabaseClient']['DBname'][12]
+        DBname_collect_time = self.dict_cfg['DatabaseClient']['DBname'][10]
+        DBname_process_time = self.dict_cfg['DatabaseClient']['DBname'][11]
+        DBname_write_time = self.dict_cfg['DatabaseClient']['DBname'][12]
+        DBname_sep_table_time = self.dict_cfg['DatabaseClient']['DBname'][13]
         # 处理集合
         dict_info = {
             'terminal': 
@@ -310,6 +312,7 @@ class PSD_Monitoring(object):
                 'DBname-station': DBname_station,
                 'DBname-station_SAVE': DBname_station_SAVE,
                 'DBname-station_HISTORY': DBname_station_HISTORY,
+                'DBname-station_HISTORY_memory': DBname_station_HISTORY_memory,
                 'DBname-train': DBname_train,
                 'DBname-network': DBname_network,
                 'DBname-alert_record': DBname_alert_record,
@@ -333,6 +336,7 @@ class PSD_Monitoring(object):
                 self.window_show_flag = False
                 alert_show_time = datetime.now()
                 alert_show_time = self.time_split_point(alert_show_time.strftime('%Y-%m-%d %H:%M:%S.%f'), 3)
+            # logging.warning("报警时间：{}".format(alert_show_time))
             self.box = QMessageBox.warning(None, "监测异常", "报警时间：{}".format(alert_show_time), QMessageBox.Ok)
             self.alert_event.clear() 
     
@@ -364,30 +368,38 @@ class PSD_Monitoring(object):
     def DataBase_connect(self, HOST, PORT, USER, PASSWORD, save_all):
         # connect to database 
         try:
-            # station 
+            # # station 
             self.DBclient = InfluxDBClient(HOST, PORT, USER, PASSWORD)
             station = self.database_info['DBname-station']
             self.DBclient.switch_database(station)
-            query_retention = f'CREATE RETENTION POLICY "station_retention" ON "{station}" DURATION 1h REPLICATION 1 DEFAULT'
-            self.DBclient.query(query_retention) 
-            # station history
+            # query_retention = f'CREATE RETENTION POLICY "station_retention" ON "{station}" DURATION 1h REPLICATION 1 DEFAULT'
+            # self.DBclient.query(query_retention) 
+            
+            # # station history
             self.DBclient = InfluxDBClient(HOST, PORT, USER, PASSWORD)
             station = self.database_info['DBname-station_HISTORY']
             self.DBclient.switch_database(station)
-            query_retention = f'CREATE RETENTION POLICY "station_HISTORY_retention" ON "{station}" DURATION 3d REPLICATION 1 DEFAULT'
-            self.DBclient.query(query_retention) 
-            # alert record
+            # query_retention = f'CREATE RETENTION POLICY "station_HISTORY_retention" ON "{station}" DURATION 3d REPLICATION 1 DEFAULT'
+            # self.DBclient.query(query_retention) 
+
+            self.DBclient_memory = InfluxDBClient(HOST, PORT, USER, PASSWORD)
+            station = self.database_info['DBname-station_HISTORY_memory']
+            self.DBclient_memory.switch_database(station)
+            # query_retention = f'CREATE RETENTION POLICY "station_HISTORY_memory_retention" ON "{station}" DURATION 3650d REPLICATION 1 DEFAULT'
+            # self.DBclient_memory.query(query_retention) 
+
+            # # alert record
             self.DBclient_alarm = InfluxDBClient(HOST, PORT, USER, PASSWORD)
             station = self.database_info["DBname-alert_record"]
             self.DBclient_alarm.switch_database(station)
-            query_retention = f'CREATE RETENTION POLICY "alert_record_retention" ON "{station}" DURATION 1h REPLICATION 1 DEFAULT'
-            self.DBclient_alarm.query(query_retention) 
-            # alert settle
+            # query_retention = f'CREATE RETENTION POLICY "alert_record_retention" ON "{station}" DURATION 1h REPLICATION 1 DEFAULT'
+            # self.DBclient_alarm.query(query_retention) 
+            # # alert settle
             self.DBclient_alert_settle = InfluxDBClient(HOST, PORT, USER, PASSWORD)
             station = self.database_info["DBname-alert_settled"]
             self.DBclient_alert_settle.switch_database(station)
-            query_retention = f'CREATE RETENTION POLICY "alert_settled_retention" ON "{station}" DURATION 1h REPLICATION 1 DEFAULT'
-            self.DBclient_alert_settle.query(query_retention) 
+            # query_retention = f'CREATE RETENTION POLICY "alert_settled_retention" ON "{station}" DURATION 1h REPLICATION 1 DEFAULT'
+            # self.DBclient_alert_settle.query(query_retention) 
 
             # 用于监控设备状态
             if self.debug_monitor:
@@ -538,6 +550,7 @@ class PSD_Monitoring(object):
             yesterday = (now - timedelta(1)).strftime('%Y-%m-%d')
             day_before_yesterday = (datetime.now() - timedelta(2)).strftime('%Y-%m-%d')
             yesterday_utc = (now - timedelta(1)).strftime('%Y-%m-%dT16:00:00Z')
+            self.memory_measurement = self.database_info['DBname-station_HISTORY_memory']
             self.source_measurement = self.database_info['DBname-station_HISTORY']
             new_measurement = self.source_measurement + "_" + now.strftime('%Y%m%d')
             new_measurement = new_measurement.replace(now.strftime('%Y%m%d'), yesterday.replace('-', '')) 
@@ -548,14 +561,9 @@ class PSD_Monitoring(object):
             # new_history_data = [self.new_HISTORY_set]
             #self.DBclient.switch_database(self.source_measurement)
             sep_client.switch_database(self.source_measurement)
+            self.DBclient_memory.switch_database(self.memory_measurement)
             while True: 
                 start_time = datetime.now() 
-                # if(self.sep == True):
-                #     # 结束线程 
-                #     sep_client.close()
-                #     self.sep_event.clear()     
-                #     self.create_sep_thread = True
-                #     break
                 try:
                     # yesterday_utc = (datetime.now(pytz.utc) - timedelta(1)).strftime('%Y-%m-%dT%H:%M:%SZ')
                     # day_before_yesterday = (datetime.now() - timedelta(2)).strftime('%Y-%m-%d')
@@ -609,8 +617,8 @@ class PSD_Monitoring(object):
                         self.new_measurement = new_measurement
                         new_points.append(new_point) 
                         i+=1
-                    if new_points:
-                        sep_client.write_points(new_points)
+                    if new_points: 
+                        self.DBclient_memory.write_points(new_points)
                     min += 1
                     if min >= 24*60: 
                         # 分完但未清表 
@@ -1024,43 +1032,43 @@ class PSD_Monitoring(object):
         try:
             self.DBclient.write_points(cache)
         except Exception as e:
-            print("写入失败:" + str(self.database_info[db_name]) )
+            logging.critical("写入失败:" + str(self.database_info[db_name]))
 
     def write_cache_to_alarm_database(self, cache):
         try:
             self.DBclient_alarm.write_points(cache)
         except Exception as e:
-            print("写入失败:" + str(self.database_info["DBname-alert_record"]) )
+            logging.critical("写入失败:" + str(self.database_info["DBname-alert_record"]))
 
     def write_cache_to_alert_settle_database(self, cache):
         try:
             self.DBclient_alert_settle.write_points(cache)
         except Exception as e:
-            print("写入失败:" + str(self.database_info["DBname-alert_settled"]) )
+            logging.critical("写入失败:" + str(self.database_info["DBname-alert_settled"]))
 
     def write_cache_to_collect_time_database(self, cache):
         try:
             self.DBclient_collect_time.write_points(cache)
         except Exception as e:
-            print("写入失败:" + str(self.database_info["DBname-collect_time"]) )
+            logging.critical("写入失败:" + str(self.database_info["DBname-collect_time"]))
     
     def write_cache_to_process_time_database(self, cache):
         try:
             self.DBclient_data_process_time.write_points(cache)
         except Exception as e:
-            print("写入失败:" + str(self.database_info["DBname-process_time"]) )
+            logging.critical("写入失败:" + str(self.database_info["DBname-process_time"]))
 
     def write_cache_to_sep_table_time_database(self, cache):
         try:
             self.DBclient_data_process_time.write_points(cache)
         except Exception as e:
-            print("写入失败:" + str(self.database_info["DBname-sep_table_time"]) )
+            logging.critical("写入失败:" + str(self.database_info["DBname-process_time"]))
 
     def write_cache_to_write_db_time_database(self, cache):
         try:
             self.DBclient_write_db_time.write_points(cache)
         except Exception as e:
-            print("写入失败:" + str(self.database_info["DBname-write_time"]) )
+            logging.critical("写入失败:" + str(self.database_info["DBname-write_time"]))
 
     ################################################################################################################## 
     
@@ -1218,7 +1226,7 @@ class PSD_Monitoring(object):
                 
                 except ModbusException as e:
                     # 捕获modebus相关异常并处理
-                    print('reconnecting...' + str(e))
+                    logging.warning('reconnecting...' + str(e))
                     TCP_connect_flag = False
                     self.handle_modbus_exception(e)
                     if self.TCPclient is not None:
@@ -1226,7 +1234,7 @@ class PSD_Monitoring(object):
                     time.sleep(4)   
                     
                 except Exception as e:
-                    print('reconnecting...' + str(e))
+                    logging.warning('reconnecting...' + str(e))
                     TCP_connect_flag = False
                     if self.TCPclient is not None:
                         self.TCPclient.close()
@@ -1354,7 +1362,7 @@ class PSD_Monitoring(object):
                     self.monitor_object.DataBase_collect_time_send(milliseconds_collect_time, alarm_time_UTC)   
 
         except Exception as e:
-            print(f"捕获异常:{e}")
+            logging.warning(f"捕获异常:{e}")
             # 在调试时确保清理操作被执行
             self.Modbustcp_close()
 
@@ -1371,26 +1379,25 @@ class PSD_Monitoring(object):
     def handle_modbus_exception(self, e):  
         if isinstance(e, ModbusIOException):  
             # 处理I/O异常，如连接问题  
-            print("I/O Exception:" + str(e))  
+            logging.warning("I/O Exception:" + str(e)) 
             # 可以尝试重新连接或通知用户检查网络连接  
         elif isinstance(e, ModbusException):  
             # 处理其他Modbus异常  
             # 注意：这里不会直接区分Modbus协议中的具体异常代码  
             # 但你可以根据异常消息进行更细致的处理  
-            print("Modbus Exception:" + str(e))  
+            logging.warning("Modbus Exception:" + str(e))  
             if "Illegal function" in str(e):  
-                # 处理非法功能码异常  
-                print("Illegal function requested.")  
+                # 处理非法功能码异常  \
+                logging.warning("Illegal function requested.") 
             # ... 进行相应的处理  
             elif "Slave device or server failure" in str(e):  
                 # 处理从设备或服务器故障  
-                print("Slave device or server failure.")  
+                logging.warning("Slave device or server failure.")
                 # ... 进行相应的处理  
             # ... 可以添加更多基于消息内容的判断  
         else:  
             # 处理未知异常  
-            print("Unknown Exception:" + str(e))  
-                     
+            logging.warning("Unknown Exception:" + str(e))         
                    
     def main_thread(self, T_cls, T, cycle, continous, base_time):  
         connect_flag = True
